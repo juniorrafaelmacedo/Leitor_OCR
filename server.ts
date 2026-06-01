@@ -28,7 +28,12 @@ function getGeminiClient(): GoogleGenAI {
 }
 
 // Helper function to call Gemini with automatic exponential backoff retry on HTTP 429 / Quota Errors and HTTP 503 / High Demand
-async function callGeminiWithRetry(gemini: GoogleGenAI, params: any, maxRetries = 4): Promise<any> {
+async function callGeminiWithRetry(
+  gemini: GoogleGenAI, 
+  params: any, 
+  maxRetries = 6,
+  onRetry?: (msg: string) => void
+): Promise<any> {
   let attempt = 0;
   let delay = 3000; // start with 3 seconds
   let currentModel = params.model || 'gemini-3.5-flash';
@@ -64,16 +69,22 @@ async function callGeminiWithRetry(gemini: GoogleGenAI, params: any, maxRetries 
       if ((isRateLimit || isTransient) && attempt <= maxRetries) {
         let sleepMs = delay;
         
-        // If the server is experiencing high demand (503), switch model to a highly available fallback
-        if (isTransient) {
+        if (isRateLimit) {
+          // Para limite de quotas do plano grátis (429), pausamos taticamente por mais tempo para girar a janela de tempo (geralmente de 1 min)
+          sleepMs = (15 + attempt * 10) * 1000; // 1ª vez: 25s, 2ª vez: 35s, etc.
+          onRetry?.(`Prevenção de Cota Gratuita (429). Aguardando ${sleepMs / 1000}s para resetar janela de cota do Gemini (Tentativa ${attempt}/${maxRetries})...`);
+        } else if (isTransient) {
+          // Para desvios de alta demanda (503), uma pequena pausa e alternância de modelo resolvem rápido
+          sleepMs = (7 + attempt * 5) * 1000;
+          
           if (currentModel === 'gemini-3.5-flash') {
             currentModel = 'gemini-2.5-flash';
-          } else if (currentModel === 'gemini-2.5-flash') {
+          } else if (currentModel === 'gemini-2.1-flash' || currentModel === 'gemini-2.5-flash') {
             currentModel = 'gemini-1.5-flash';
           } else {
             currentModel = 'gemini-1.5-flash';
           }
-          console.warn(`[Gemini API 503] Modelo instável ou sob alta demana. Trocando para o modelo reserva: ${currentModel}`);
+          onRetry?.(`Instabilidade temporária (503). Mudando para o modelo [${currentModel}] em ${sleepMs / 1000}s...`);
         }
 
         try {
@@ -93,7 +104,19 @@ async function callGeminiWithRetry(gemini: GoogleGenAI, params: any, maxRetries 
         }
 
         console.warn(`[Gemini API Retry] Falha temporária ou cota atingida. Tentativa ${attempt}/${maxRetries}. Aguardando ${sleepMs / 1000}s com modelo ${currentModel}...`);
-        await new Promise(resolve => setTimeout(resolve, sleepMs));
+        
+        // Contagem regressiva ativa enviando status dinâmico para o polling do frontend
+        const step = 1000;
+        let remaining = sleepMs;
+        while (remaining > 0) {
+          onRetry?.(
+            isRateLimit
+              ? `Aguardando ${(remaining / 1000).toFixed(0)}s para girar cota gratuita (Tentativa ${attempt}/${maxRetries}...). Seus 300 arquivos estão seguros!`
+              : `Alternando para o modelo reserva [${currentModel}] em ${(remaining / 1000).toFixed(0)}s por flutuação global...`
+          );
+          await new Promise(resolve => setTimeout(resolve, Math.min(step, remaining)));
+          remaining -= step;
+        }
         
         // Exponentially increase backend scale delay for next try
         delay = delay * 2 + Math.floor(Math.random() * 2000);
@@ -122,6 +145,7 @@ interface ServerQueueItem {
   status: 'pending' | 'processing' | 'completed' | 'failed';
   progress: number;
   error?: string;
+  retryMessage?: string;
   extractedData?: Record<string, any>;
   rawSummary?: string;
   uploadedAt: string;
@@ -132,19 +156,16 @@ interface ServerQueueItem {
 // Global In-Memory queue
 const queue: ServerQueueItem[] = [];
 const fileContentsMap = new Map<string, string>(); // id -> base64
-let isProcessing = false;
-let queueDelayMs = 2000; // Default cooldown delay between files to respect rate-limits
+let activeWorkers = 0;
+let maxConcurrency = 1; // Default to 1 (economic/free plan auto-scaled)
+let queueDelayMs = 4500; // Default cooldown delay 4.5s between files to safely stay standard below 15 RPM (free tier limits)
 
-// Queue workers
-async function processQueue() {
-  if (isProcessing) return;
-
-  const itemToProcess = queue.find(item => item.status === 'pending');
-  if (!itemToProcess) return;
-
-  isProcessing = true;
+// Worker method to process a single item
+async function runWorker(itemToProcess: ServerQueueItem) {
+  activeWorkers++;
   itemToProcess.status = 'processing';
   itemToProcess.progress = 15;
+  itemToProcess.retryMessage = undefined;
 
   try {
     const base64Data = fileContentsMap.get(itemToProcess.id);
@@ -212,9 +233,13 @@ Instruções importantes:
           required: requiredList
         }
       }
+    }, 6, (msg) => {
+      // Atualizar mensagem de reporte que vai pro poll do front-end
+      itemToProcess.retryMessage = msg;
     });
 
     itemToProcess.progress = 85;
+    itemToProcess.retryMessage = undefined;
 
     const responseText = response.text;
     if (!responseText) {
@@ -254,6 +279,7 @@ Instruções importantes:
     console.error("Erro no processamento do item:", itemToProcess.fileName, error);
     itemToProcess.status = 'failed';
     itemToProcess.progress = 100;
+    itemToProcess.retryMessage = undefined;
     
     let errorMsg = error?.message || "Ocorreu um erro desconhecido durante o OCR com Gemini.";
     if (String(errorMsg).includes("429") || String(errorMsg).includes("Quota exceeded") || String(errorMsg).includes("RESOURCE_EXHAUSTED") || String(errorMsg).includes("limit: 20")) {
@@ -261,7 +287,8 @@ Instruções importantes:
     }
     itemToProcess.error = errorMsg;
   } finally {
-    isProcessing = false;
+    activeWorkers--;
+    itemToProcess.retryMessage = undefined;
     // Release heavy raw base64 data to keep RAM footprint low
     fileContentsMap.delete(itemToProcess.id);
 
@@ -269,6 +296,17 @@ Instruções importantes:
     setTimeout(() => {
       processQueue().catch(console.error);
     }, queueDelayMs);
+  }
+}
+
+// Queue workers manager
+async function processQueue() {
+  while (activeWorkers < maxConcurrency) {
+    const itemToProcess = queue.find(item => item.status === 'pending');
+    if (!itemToProcess) break;
+
+    // Start processing asynchoronously
+    runWorker(itemToProcess).catch(console.error);
   }
 }
 
@@ -337,6 +375,7 @@ async function startServer() {
         status: item.status,
         progress: item.progress,
         error: item.error,
+        retryMessage: item.retryMessage,
         extractedData: item.extractedData,
         rawSummary: item.rawSummary,
         uploadedAt: item.uploadedAt,
@@ -404,21 +443,28 @@ async function startServer() {
   app.post("/api/queue/clear", (req, res) => {
     queue.length = 0;
     fileContentsMap.clear();
-    isProcessing = false;
+    activeWorkers = 0;
     res.json({ success: true });
   });
 
   // Get/Set processing delay configurations
   app.get("/api/queue/settings", (req, res) => {
-    res.json({ delayMs: queueDelayMs });
+    res.json({ delayMs: queueDelayMs, maxConcurrency });
   });
 
   app.post("/api/queue/settings", (req, res) => {
-    const { delayMs } = req.body;
+    const { delayMs, maxConcurrency: targetConcurrency } = req.body;
     if (typeof delayMs === 'number' && delayMs >= 0) {
       queueDelayMs = delayMs;
     }
-    res.json({ success: true, delayMs: queueDelayMs });
+    if (typeof targetConcurrency === 'number' && targetConcurrency >= 1) {
+      maxConcurrency = targetConcurrency;
+    }
+    
+    // Trigger queue in case concurrency has been raised
+    processQueue().catch(console.error);
+
+    res.json({ success: true, delayMs: queueDelayMs, maxConcurrency });
   });
 
   // Vite development integration or static serving

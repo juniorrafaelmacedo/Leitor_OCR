@@ -16,6 +16,7 @@ export interface QueueItem {
   status: QueueItemStatus;
   progress: number;
   error?: string;
+  retryMessage?: string;
   extractedData?: Record<string, any>;
   rawSummary?: string;
   uploadedAt: string;

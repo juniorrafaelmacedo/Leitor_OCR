@@ -21,6 +21,7 @@ export default function App() {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [delayMs, setDelayMs] = useState<number>(2000);
+  const [maxConcurrency, setMaxConcurrency] = useState<number>(1);
   const [isServerOffline, setIsServerOffline] = useState(false);
 
   // Poll server for queue updates
@@ -44,8 +45,13 @@ export default function App() {
         return;
       }
       const data = await res.json();
-      if (data && typeof data.delayMs === 'number') {
-        setDelayMs(data.delayMs);
+      if (data) {
+        if (typeof data.delayMs === 'number') {
+          setDelayMs(data.delayMs);
+        }
+        if (typeof data.maxConcurrency === 'number') {
+          setMaxConcurrency(data.maxConcurrency);
+        }
         setIsServerOffline(false);
       }
     } catch (e) {
@@ -54,12 +60,12 @@ export default function App() {
     }
   };
 
-  const handleUpdateDelay = async (val: number) => {
+  const handleUpdateSettings = async (updates: { delayMs?: number; maxConcurrency?: number }) => {
     try {
       const res = await fetch('/api/queue/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ delayMs: val })
+        body: JSON.stringify(updates)
       });
       const contentType = res.headers.get('content-type') || '';
       if (!res.ok || !contentType.includes('application/json')) {
@@ -68,6 +74,7 @@ export default function App() {
       const data = await res.json();
       if (data.success) {
         setDelayMs(data.delayMs);
+        setMaxConcurrency(data.maxConcurrency);
         setIsServerOffline(false);
       }
     } catch (e) {
@@ -338,7 +345,8 @@ export default function App() {
               onFilesDropped={handleFilesDropped}
               onClearQueue={handleClearQueue}
               delayMs={delayMs}
-              onDelayChange={handleUpdateDelay}
+              maxConcurrency={maxConcurrency}
+              onUpdateSettings={handleUpdateSettings}
             />
           </div>
         </div>
