@@ -8,8 +8,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 # Copy dependency files
 COPY package*.json ./
 
-# Install ALL dependencies (needed to build)
-RUN npm ci
+# Install ALL dependencies (using npm install for maximum compatibility regardless of lockfile sync status)
+RUN npm install
 
 # Copy the rest of the application files
 COPY . .
@@ -27,11 +27,10 @@ COPY --from=builder /app/package*.json ./
 COPY --from=builder /app/dist ./dist
 
 # Install ONLY production dependencies for security and speed
-RUN npm ci --only=production
+RUN npm install --omit=dev
 
-# Cloud Run defaults to exposing traffic on 8080, but can be configured to other ports.
-# We expose 3000 as our app default port.
-EXPOSE 3000
+# Cloud Run defaults to exposing traffic on 8080.
+EXPOSE 8080
 
-# Command to launch the bundled production server
-CMD ["npm", "start"]
+# Command to launch the bundled production server directly
+CMD ["node", "dist/server.cjs"]
