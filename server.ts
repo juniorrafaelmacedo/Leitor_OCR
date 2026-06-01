@@ -27,28 +27,55 @@ function getGeminiClient(): GoogleGenAI {
   return ai;
 }
 
-// Helper function to call Gemini with automatic exponential backoff retry on HTTP 429 / Quota Errors
-async function callGeminiWithRetry(gemini: GoogleGenAI, params: any, maxRetries = 3): Promise<any> {
+// Helper function to call Gemini with automatic exponential backoff retry on HTTP 429 / Quota Errors and HTTP 503 / High Demand
+async function callGeminiWithRetry(gemini: GoogleGenAI, params: any, maxRetries = 4): Promise<any> {
   let attempt = 0;
-  let delay = 5000; // start with 5 seconds for rate limit recovery
+  let delay = 3000; // start with 3 seconds
+  let currentModel = params.model || 'gemini-3.5-flash';
 
   while (true) {
     try {
-      return await gemini.models.generateContent(params);
+      // Create a shallow copy with the active model (allowing backup transition)
+      const queryParams = { ...params, model: currentModel };
+      return await gemini.models.generateContent(queryParams);
     } catch (error: any) {
       attempt++;
       
       const errorMessage = error?.message || "";
-      const isRateLimit = error?.status === 429 || 
-                          error?.statusCode === 429 ||
+      const status = error?.status || error?.statusCode || 0;
+      
+      const isRateLimit = status === 429 || 
                           errorMessage.includes("429") ||
                           errorMessage.includes("Quota exceeded") ||
                           errorMessage.includes("RESOURCE_EXHAUSTED") ||
                           errorMessage.includes("rate-limits") ||
                           errorMessage.includes("limit: 20");
+
+      const isTransient = status === 503 || 
+                          status === 504 ||
+                          status === 500 ||
+                          errorMessage.includes("503") ||
+                          errorMessage.includes("UNAVAILABLE") ||
+                          errorMessage.includes("high demand") ||
+                          errorMessage.includes("temporary") ||
+                          errorMessage.includes("Service Unavailable") ||
+                          errorMessage.includes("504");
       
-      if (isRateLimit && attempt <= maxRetries) {
+      if ((isRateLimit || isTransient) && attempt <= maxRetries) {
         let sleepMs = delay;
+        
+        // If the server is experiencing high demand (503), switch model to a highly available fallback
+        if (isTransient) {
+          if (currentModel === 'gemini-3.5-flash') {
+            currentModel = 'gemini-2.5-flash';
+          } else if (currentModel === 'gemini-2.5-flash') {
+            currentModel = 'gemini-1.5-flash';
+          } else {
+            currentModel = 'gemini-1.5-flash';
+          }
+          console.warn(`[Gemini API 503] Modelo instável ou sob alta demana. Trocando para o modelo reserva: ${currentModel}`);
+        }
+
         try {
           // Attempt to extract requested delay from error text, e.g. "Please retry in 32.345035661s." or "retryDelay":"32s"
           const secondsMatch = errorMessage.match(/retry in\s+([\d.]+)\s*s/i) || 
@@ -65,7 +92,7 @@ async function callGeminiWithRetry(gemini: GoogleGenAI, params: any, maxRetries 
           // Fallback to exponential delay
         }
 
-        console.warn(`[Gemini API Quota 429] Limit hit. Retrying attempt ${attempt}/${maxRetries} after sleeping ${sleepMs / 1000} seconds...`);
+        console.warn(`[Gemini API Retry] Falha temporária ou cota atingida. Tentativa ${attempt}/${maxRetries}. Aguardando ${sleepMs / 1000}s com modelo ${currentModel}...`);
         await new Promise(resolve => setTimeout(resolve, sleepMs));
         
         // Exponentially increase backend scale delay for next try
