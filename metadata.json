@@ -1,0 +1,6 @@
+{
+  "name": "Leitor de PDF, OCR e Catalogador de Excel",
+  "description": "Uma plataforma inteligente para processamento em lote de PDFs, extração de dados via OCR com IA e exportação catalogada para Excel.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
