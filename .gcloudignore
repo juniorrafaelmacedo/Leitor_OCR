@@ -1,0 +1,8 @@
+.gcloudignore
+.git
+.github
+node_modules
+dist
+.env
+.env.local
+.env.*.local

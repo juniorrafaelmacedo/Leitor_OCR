@@ -21,6 +21,7 @@ export default function App() {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [delayMs, setDelayMs] = useState<number>(2000);
+  const [isServerOffline, setIsServerOffline] = useState(false);
 
   // Poll server for queue updates
   useEffect(() => {
@@ -37,12 +38,19 @@ export default function App() {
   const fetchSettings = async () => {
     try {
       const res = await fetch('/api/queue/settings');
+      const contentType = res.headers.get('content-type') || '';
+      if (!res.ok || !contentType.includes('application/json')) {
+        setIsServerOffline(true);
+        return;
+      }
       const data = await res.json();
       if (data && typeof data.delayMs === 'number') {
         setDelayMs(data.delayMs);
+        setIsServerOffline(false);
       }
     } catch (e) {
       console.error("Erro ao carregar configurações de delay:", e);
+      setIsServerOffline(true);
     }
   };
 
@@ -53,9 +61,14 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ delayMs: val })
       });
+      const contentType = res.headers.get('content-type') || '';
+      if (!res.ok || !contentType.includes('application/json')) {
+        throw new Error("O servidor de backend não respondeu com JSON na atualização do delay.");
+      }
       const data = await res.json();
       if (data.success) {
         setDelayMs(data.delayMs);
+        setIsServerOffline(false);
       }
     } catch (e) {
       console.error("Erro ao atualizar delay:", e);
@@ -65,12 +78,19 @@ export default function App() {
   const fetchQueue = async () => {
     try {
       const res = await fetch('/api/queue');
+      const contentType = res.headers.get('content-type') || '';
+      if (!res.ok || !contentType.includes('application/json')) {
+        setIsServerOffline(true);
+        return;
+      }
       const data = await res.json();
       if (data.success) {
         setQueue(data.queue);
+        setIsServerOffline(false);
       }
     } catch (e) {
       console.error("Não foi possível conectar-se ao servidor de OCR:", e);
+      setIsServerOffline(true);
     }
   };
 
@@ -112,6 +132,11 @@ export default function App() {
             fields: fields // Send contemporary defined targeting schema!
           })
         });
+
+        const contentType = res.headers.get('content-type') || '';
+        if (!contentType.includes('application/json')) {
+          throw new Error("O servidor respondeu com um formato inválido (HTML). Seus arquivos não puderam ser enfileirados. Verifique se o seu backend Express está online ou se foi hospedado em um ambiente estático como o Cloudflare Pages padrão.");
+        }
 
         const data = await res.json();
         if (!res.ok || !data.success) {
@@ -239,6 +264,28 @@ export default function App() {
 
       {/* Main Container */}
       <main className="grow w-full max-w-7xl mx-auto p-4 md:p-6 space-y-4">
+        {/* Static Hosting / Server Offline Alert Warning */}
+        {isServerOffline && (
+          <div className="bg-amber-100 border-2 border-amber-950 text-amber-950 font-mono text-xs p-4 shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] rounded-none space-y-2">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-5 h-5 text-amber-800 shrink-0" />
+              <p className="font-bold uppercase tracking-wider text-sm">[ DETECTADO: SERVIDOR BACKEND OFFLINE / HOSPEDAGEM PORTÁTIL OU ESTÁTICA ]</p>
+            </div>
+            <p className="leading-relaxed text-[11px] font-semibold text-dark-900/90">
+              O front-end não pôde conectar-se com o servidor Node.js backend estruturado na aplicação (as rotas do diretório <code className="bg-amber-200 px-1">/api/*</code> retornaram um formato não-JSON ou erro de rede).
+              Isso costuma ocorrer caso você tenha feito o deploy desta aplicação em um ambiente de <strong>hospedagem puramente estática (como o Cloudflare Pages padrão, Netlify ou GitHub Pages)</strong> sem acoplar o servidor Express de back-end.
+            </p>
+            <div className="bg-white/60 p-3 border border-amber-950/20 rounded-none space-y-1.5 text-[10px]">
+              <span className="font-bold text-dark-900 block font-sans">Como solucionar este cenário e evitar o erro:</span>
+              <ul className="list-disc list-inside space-y-1">
+                <li><strong>Opção Recomendada (Cloud Run do Google Cloud):</strong> O AI Studio permite publicar a aplicação diretamente no Cloud Run. O Cloud Run hospeda o front-end e o back-end integrados em um container Docker unificado rodando em alta performance e escalabilidade.</li>
+                <li><strong>Deploy Full-Stack Alternativo:</strong> Se desejar utilizar plataformas externas ao AI Studio, faça o deploy em plataformas que oferecem suporte nativo a servidores Node/Express tradicionais, tais como <em>Railway.app</em>, <em>Render.com</em>, <em>Fly.io</em>, ou <em>Heroku</em>.</li>
+                <li><strong>Adaptação Cloudflare (Worker de API):</strong> Caso prefira manter no Cloudflare, as rotas que dependem do arquivo <code className="bg-amber-200 px-1">server.ts</code> devem ser migradas para o <strong>Cloudflare Workers (usando Cloudflare Pages Functions)</strong> de modo que rodem como funções Serverless.</li>
+              </ul>
+            </div>
+          </div>
+        )}
+
         {/* Notice Board Instruction */}
         <div className="bg-[#D1D0CC] border-2 border-dark-900 p-4 shadow-sm flex items-start gap-3">
           <div className="p-1.5 bg-dark-900 text-brand-orange border border-dark-900 shrink-0">
