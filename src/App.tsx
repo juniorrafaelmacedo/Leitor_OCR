@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { ExtractionField, QueueItem, ProcessingStats } from './types';
 import { TemplateSelector } from './components/TemplateSelector';
 import { QueueViewer } from './components/QueueViewer';
@@ -7,11 +7,12 @@ import { DocumentDrawer } from './components/DocumentDrawer';
 import { Sparkles, FileText, Cpu, AlertCircle, Info, HelpCircle } from 'lucide-react';
 
 const INITIAL_FIELDS: ExtractionField[] = [
-  { id: '1', name: 'numero_nota', label: 'Número da Nota', type: 'string', description: 'O número de série ou identificador único da nota fiscal ou fatura', required: true },
-  { id: '2', name: 'data_emissao', label: 'Data de Emissão', type: 'date', description: 'A data em que a nota ou fatura foi emitida, preferencialmente formatada em YYYY-MM-DD', required: true },
-  { id: '3', name: 'valor_total', label: 'Valor Total', type: 'currency', description: 'O valor financeiro total líquido ou bruto do documento em reais (ex: 2450.00)', required: true },
-  { id: '4', name: 'emissor_nome', label: 'Razão Social/Emissor', type: 'string', description: 'O nome da empresa ou pessoa emitente do documento', required: false },
-  { id: '5', name: 'emissor_cnpj', label: 'CNPJ do Emissor', type: 'string', description: 'O CNPJ da empresa que emitiu o documento fiscal', required: false }
+  { id: '31', name: 'numero_instalacao', label: 'Nº da Instalação', type: 'string', description: 'O código ou número da instalação da unidade consumidora de energia', required: true },
+  { id: '32', name: 'mes_referencia', label: 'Mês Referência', type: 'string', description: 'O mês e ano de faturamento da conta, por exemplo, 05/2026', required: true },
+  { id: '33', name: 'data_vencimento', label: 'Vencimento', type: 'date', description: 'A data de vencimento final da fatura', required: true },
+  { id: '34', name: 'valor_total', label: 'Valor Total', type: 'currency', description: 'O valor monetário total a ser pago da conta de luz em reais', required: true },
+  { id: '35', name: 'consumo_kwh', label: 'Consumo (kWh)', type: 'number', description: 'A quantidade gasta de energia ativa consumida em kWh registrado nesta fatura (pode estar descrito como "consumo", "kWh", "consumo ativo", "total consumido" ou "energia ativa")', required: true },
+  { id: '36', name: 'concessionaria', label: 'Distribuidora', type: 'string', description: 'Nome da concessionária distribuidora de energia (ex: Enel, Light, Neoenergia, CPFL, Cemig, Copel)', required: false }
 ];
 
 export default function App() {
@@ -22,7 +23,18 @@ export default function App() {
   const [isUploading, setIsUploading] = useState(false);
   const [delayMs, setDelayMs] = useState<number>(2000);
   const [maxConcurrency, setMaxConcurrency] = useState<number>(1);
+  const [extractionMode, setExtractionMode] = useState<'hybrid' | 'direct' | 'ai' | 'ocr-space' | 'ocr-space-only'>('ocr-space-only');
+  const [isQueuePaused, setIsQueuePaused] = useState<boolean>(false);
+  const [maxRetries, setMaxRetries] = useState<number>(3);
   const [isServerOffline, setIsServerOffline] = useState(false);
+
+  // ocr.space active parameters
+  const [ocrApiKey, setOcrApiKey] = useState<string>('K88221884388957');
+  const [ocrEngine, setOcrEngine] = useState<string>('2');
+  const [ocrLanguage, setOcrLanguage] = useState<string>('por');
+
+  // In-memory reference mapping QueueItem ID to Base64 file contents to enable retrying from catalog rows
+  const fileBase64sRef = useRef<Record<string, string>>({});
 
   // Poll server for queue updates
   useEffect(() => {
@@ -52,6 +64,24 @@ export default function App() {
         if (typeof data.maxConcurrency === 'number') {
           setMaxConcurrency(data.maxConcurrency);
         }
+        if (data.extractionMode) {
+          setExtractionMode(data.extractionMode);
+        }
+        if (typeof data.isQueuePaused === 'boolean') {
+          setIsQueuePaused(data.isQueuePaused);
+        }
+        if (typeof data.maxRetries === 'number') {
+          setMaxRetries(data.maxRetries);
+        }
+        if (typeof data.ocrApiKey === 'string') {
+          setOcrApiKey(data.ocrApiKey);
+        }
+        if (typeof data.ocrEngine === 'string') {
+          setOcrEngine(data.ocrEngine);
+        }
+        if (typeof data.ocrLanguage === 'string') {
+          setOcrLanguage(data.ocrLanguage);
+        }
         setIsServerOffline(false);
       }
     } catch (e) {
@@ -60,7 +90,16 @@ export default function App() {
     }
   };
 
-  const handleUpdateSettings = async (updates: { delayMs?: number; maxConcurrency?: number }) => {
+  const handleUpdateSettings = async (updates: { 
+    delayMs?: number; 
+    maxConcurrency?: number; 
+    extractionMode?: 'hybrid' | 'direct' | 'ai' | 'ocr-space' | 'ocr-space-only'; 
+    isQueuePaused?: boolean; 
+    maxRetries?: number;
+    ocrApiKey?: string;
+    ocrEngine?: string;
+    ocrLanguage?: string;
+  }) => {
     try {
       const res = await fetch('/api/queue/settings', {
         method: 'POST',
@@ -75,6 +114,24 @@ export default function App() {
       if (data.success) {
         setDelayMs(data.delayMs);
         setMaxConcurrency(data.maxConcurrency);
+        if (data.extractionMode) {
+          setExtractionMode(data.extractionMode);
+        }
+        if (typeof data.isQueuePaused === 'boolean') {
+          setIsQueuePaused(data.isQueuePaused);
+        }
+        if (typeof data.maxRetries === 'number') {
+          setMaxRetries(data.maxRetries);
+        }
+        if (typeof data.ocrApiKey === 'string') {
+          setOcrApiKey(data.ocrApiKey);
+        }
+        if (typeof data.ocrEngine === 'string') {
+          setOcrEngine(data.ocrEngine);
+        }
+        if (typeof data.ocrLanguage === 'string') {
+          setOcrLanguage(data.ocrLanguage);
+        }
         setIsServerOffline(false);
       }
     } catch (e) {
@@ -101,13 +158,66 @@ export default function App() {
     }
   };
 
-  // Convert HTML5 files to Base64
+  // Convert HTML5 files to Base64, with auto-compression for large images to fit under OCR Space limits
   const convertToBase64 = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = () => resolve(reader.result as string);
-      reader.onerror = (error) => reject(error);
+      const isImage = file.type.startsWith('image/') || /\.(png|jpe?g|webp)$/i.test(file.name);
+      const isLarge = file.size > 950 * 1024; // If larger than ~950KB, we compress it
+
+      if (isImage && isLarge) {
+        console.log(`[Compression] O arquivo de imagem é grande (${(file.size / 1024).toFixed(1)} KB). Iniciando compressão automática para garantir < 1MB...`);
+        const reader = new FileReader();
+        reader.readAsDataURL(file);
+        reader.onload = (event) => {
+          const img = new Image();
+          img.src = event.target?.result as string;
+          img.onload = () => {
+            const canvas = document.createElement('canvas');
+            let width = img.width;
+            let height = img.height;
+
+            // Downscale maximum dimension to 1920px to keep text highly legible but reduce weight immensely
+            const maxDimension = 1920;
+            if (width > maxDimension || height > maxDimension) {
+              if (width > height) {
+                height = Math.round((height * maxDimension) / width);
+                width = maxDimension;
+              } else {
+                width = Math.round((width * maxDimension) / height);
+                height = maxDimension;
+              }
+            }
+
+            canvas.width = width;
+            canvas.height = height;
+
+            const ctx = canvas.getContext('2d');
+            if (!ctx) {
+              resolve(event.target?.result as string);
+              return;
+            }
+
+            // Draw image on canvas
+            ctx.drawImage(img, 0, 0, width, height);
+            
+            // Convert to highly compact JPEG (usually compiles under 150-300kb for a 1920px image, with crisp readable text)
+            const compressedBase64 = canvas.toDataURL('image/jpeg', 0.82);
+            console.log(`[Compression] Concluído! Imagem reduzida para formato JPEG de alta fidelidade.`);
+            resolve(compressedBase64);
+          };
+          img.onerror = () => {
+            // Fallback on error
+            resolve(event.target?.result as string);
+          };
+        };
+        reader.onerror = (error) => reject(error);
+      } else {
+        // Standard reading for smaller files, PDFs, etc.
+        const reader = new FileReader();
+        reader.readAsDataURL(file);
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = (error) => reject(error);
+      }
     });
   };
 
@@ -115,17 +225,21 @@ export default function App() {
     setUploadError(null);
     setIsUploading(true);
 
-    // Keep active files for sequential backend enqueuing
-    const pdfFiles = Array.from(files).filter(f => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf'));
+    // Keep active files (PDFs and standard images) for sequential backend enqueuing
+    const allowedTypes = ['application/pdf', 'image/png', 'image/jpeg', 'image/webp'];
+    const validFiles = Array.from(files).filter(f => 
+      allowedTypes.includes(f.type) || 
+      /\.(pdf|png|jpe?g|webp)$/i.test(f.name)
+    );
 
-    if (pdfFiles.length === 0) {
-      setUploadError("Por favor, selecione apenas arquivos com formato .pdf válido.");
+    if (validFiles.length === 0) {
+      setUploadError("Por favor, selecione arquivos válidos nos formatos PDF ou Imagens (PNG, JPG, JPEG, WebP).");
       setIsUploading(false);
       return;
     }
 
     try {
-      for (const file of pdfFiles) {
+      for (const file of validFiles) {
         const base64 = await convertToBase64(file);
         
         // Post base64 payload & fields schema list of fields to server queue
@@ -148,6 +262,10 @@ export default function App() {
         const data = await res.json();
         if (!res.ok || !data.success) {
           throw new Error(data.error || `Falha ao enfileirar o documento ${file.name}`);
+        }
+        
+        if (data.item?.id) {
+          fileBase64sRef.current[data.item.id] = base64;
         }
       }
 
@@ -225,6 +343,54 @@ export default function App() {
       setViewingDetailsItem(null);
     } catch (e) {
       console.error("Erro ao limpar a fila:", e);
+    }
+  };
+
+  const handleRetryRow = async (id: string) => {
+    try {
+      const base64Data = fileBase64sRef.current[id];
+      if (!base64Data) {
+        alert("O conteúdo original em base64 deste arquivo não está em cache no navegador. Solte o arquivo novamente.");
+        return;
+      }
+
+      await fetch('/api/queue/retry', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, base64Data })
+      });
+
+      await fetchQueue();
+    } catch (e) {
+      console.error("Erro ao re-enfileirar item:", e);
+    }
+  };
+
+  const handleRetryAllFailed = async () => {
+    const failedItems = queue.filter(item => item.status === 'failed');
+    if (failedItems.length === 0) return;
+
+    let retriedCount = 0;
+    for (const item of failedItems) {
+      const base64Data = fileBase64sRef.current[item.id];
+      if (base64Data) {
+        try {
+          await fetch('/api/queue/retry', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: item.id, base64Data })
+          });
+          retriedCount++;
+        } catch (err) {
+          console.error(`Erro ao reenviar item ${item.fileName}:`, err);
+        }
+      }
+    }
+
+    if (retriedCount > 0) {
+      await fetchQueue();
+    } else {
+      alert("Nenhum arquivo com falha possuía Base64 em cache. Por favor, reenvie os arquivos.");
     }
   };
 
@@ -346,7 +512,15 @@ export default function App() {
               onClearQueue={handleClearQueue}
               delayMs={delayMs}
               maxConcurrency={maxConcurrency}
+              extractionMode={extractionMode}
+              isQueuePaused={isQueuePaused}
+              maxRetries={maxRetries}
+              ocrApiKey={ocrApiKey}
+              ocrEngine={ocrEngine}
+              ocrLanguage={ocrLanguage}
               onUpdateSettings={handleUpdateSettings}
+              onRetryAllFailed={handleRetryAllFailed}
+              onRetryRow={handleRetryRow}
             />
           </div>
         </div>

@@ -253,8 +253,25 @@ export const CatalogTable: React.FC<CatalogTableProps> = ({
                           )}
                         </button>
                       </td>
-                      <td className="p-2.5 font-bold text-dark-900 border-r border-dark-900/10 max-w-[150px] truncate" title={row.fileName}>
-                        {row.fileName}
+                      <td className="p-2.5 font-bold text-dark-900 border-r border-dark-900/10 max-w-[150px]" title={row.fileName}>
+                        <div className="truncate font-black">{row.fileName}</div>
+                        {row.extractionMethod === 'direct' ? (
+                          <span className="inline-block mt-1 px-1.5 py-0.5 text-[7.5px] font-black uppercase text-[#155e75] bg-[#ecfeff] border border-[#a5f3fc] rounded-none">
+                            ⚡ TEXTO DIGITAL
+                          </span>
+                        ) : row.extractionMethod === 'ocr-space-only' ? (
+                          <span className="inline-block mt-1 px-1.5 py-0.5 text-[7.5px] font-black uppercase text-pink-900 bg-pink-50 border border-pink-200 rounded-none">
+                            🚀 APENAS OCR SPACE (SEM IA)
+                          </span>
+                        ) : row.extractionMethod === 'ocr-space' ? (
+                          <span className="inline-block mt-1 px-1.5 py-0.5 text-[7.5px] font-black uppercase text-indigo-900 bg-indigo-50 border border-indigo-200 rounded-none">
+                            🪐 OCR SPACE + IA
+                          </span>
+                        ) : (
+                          <span className="inline-block mt-1 px-1.5 py-0.5 text-[7.5px] font-black uppercase text-[#854d0e] bg-[#fef9c3] border border-[#fef08a] rounded-none">
+                            ✨ GEMINI IA
+                          </span>
+                        )}
                       </td>
 
                       {/* Columns dynamically rendered from Fields schema */}

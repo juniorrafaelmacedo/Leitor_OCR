@@ -3,6 +3,7 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
+import { extractPDFText, extractFieldsWithRegex, standardizeDate } from "./pdf_parser_helper.js";
 
 dotenv.config();
 
@@ -71,11 +72,11 @@ async function callGeminiWithRetry(
         
         if (isRateLimit) {
           // Para limite de quotas do plano grátis (429), pausamos taticamente por mais tempo para girar a janela de tempo (geralmente de 1 min)
-          sleepMs = (15 + attempt * 10) * 1000; // 1ª vez: 25s, 2ª vez: 35s, etc.
+          sleepMs = Math.min(45000, (15 + attempt * 6) * 1000); // Ex: 1ª vez: 21s, 2ª vez: 27s ... teto de 45s
           onRetry?.(`Prevenção de Cota Gratuita (429). Aguardando ${sleepMs / 1000}s para resetar janela de cota do Gemini (Tentativa ${attempt}/${maxRetries})...`);
         } else if (isTransient) {
           // Para desvios de alta demanda (503), uma pequena pausa e alternância de modelo resolvem rápido
-          sleepMs = (7 + attempt * 5) * 1000;
+          sleepMs = Math.min(30000, (7 + attempt * 4) * 1000); // teto de 30s
           
           if (currentModel === 'gemini-3.5-flash') {
             currentModel = 'gemini-2.5-flash';
@@ -118,8 +119,8 @@ async function callGeminiWithRetry(
           remaining -= step;
         }
         
-        // Exponentially increase backend scale delay for next try
-        delay = delay * 2 + Math.floor(Math.random() * 2000);
+        // Exponentially increase backend scale delay for next try (capped at 60s)
+        delay = Math.min(60000, delay * 2 + Math.floor(Math.random() * 2000));
         continue;
       }
 
@@ -150,6 +151,7 @@ interface ServerQueueItem {
   rawSummary?: string;
   uploadedAt: string;
   processedAt?: string;
+  extractionMethod?: 'direct' | 'ai' | 'ocr-space' | 'ocr-space-only';
   fields: ExtractionField[]; // Store fields to extract
 }
 
@@ -159,6 +161,77 @@ const fileContentsMap = new Map<string, string>(); // id -> base64
 let activeWorkers = 0;
 let maxConcurrency = 1; // Default to 1 (economic/free plan auto-scaled)
 let queueDelayMs = 4500; // Default cooldown delay 4.5s between files to safely stay standard below 15 RPM (free tier limits)
+let extractionMode: 'hybrid' | 'direct' | 'ai' | 'ocr-space' | 'ocr-space-only' = 'ocr-space-only';
+let isQueuePaused = false;
+let maxRetries = 3; // sensible default max attempts, to allow fast failover and not block on a stuck file
+let ocrApiKey = "K88221884388957";
+let ocrEngine = "2";
+let ocrLanguage = "por";
+
+async function performOcrSpace(
+  base64Data: string,
+  apiKey: string,
+  engine: string = "2",
+  language: string = "por"
+): Promise<string> {
+  const endpoint = "https://api.ocr.space/parse/image";
+
+  // Ensure base64Data is properly prefixed (ocr.space wants prefix)
+  let formattedBase64 = base64Data;
+  if (!base64Data.startsWith("data:")) {
+    // If no prefix, default to image/jpeg prefix
+    formattedBase64 = `data:image/jpeg;base64,${base64Data}`;
+  }
+
+  // Construct URLSearchParams
+  const params = new URLSearchParams();
+  params.append("apikey", apiKey);
+  params.append("base64Image", formattedBase64);
+  params.append("OCREngine", engine);
+  params.append("language", language);
+  params.append("isOverlayRequired", "false");
+  params.append("scale", "true");
+
+  console.log(`[ocr.space] Iniciando requisição para ${endpoint} usando Engine: ${engine} e Idioma: ${language}`);
+  
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: params.toString(),
+  });
+
+  if (!response.ok) {
+    if (response.status === 413) {
+      throw new Error("O arquivo enviado é grande demais para a API do ocr.space (Limite máximo: 1MB). DICA: Para arquivos maiores que 1MB, altere o Perfil de Extração no painel superior para 'Híbrido' (Padrão) ou 'Apenas IA (Gemini)'. O Gemini processa PDFs ou imagens de até 20MB de forma instantânea e com precisão profissional, sem esse limite de tamanho!");
+    }
+    throw new Error(`Erro na rede da API ocr.space: status ${response.status} (${response.statusText})`);
+  }
+
+  const result: any = await response.json();
+
+  if (result.IsErroredOnProcessing) {
+    const errorDetails = (Array.isArray(result.ErrorMessage) ? result.ErrorMessage.join(", ") : result.ErrorMessage) || result.ErrorDetails || "Erro desconhecido no processamento do OCR.";
+    throw new Error(`A API ocr.space falhou: ${errorDetails}`);
+  }
+
+  const parsedResults = result.ParsedResults;
+  if (!parsedResults || !Array.isArray(parsedResults) || parsedResults.length === 0) {
+    if (result.ErrorMessage) {
+      throw new Error(`Falha no OCR: ${result.ErrorMessage}`);
+    }
+    throw new Error("A API ocr.space não conseguiu extrair nenhum texto desse documento.");
+  }
+
+  // Concatenate parsed texts from all pages (for multi-page pdfs, etc)
+  const extractedText = parsedResults.map((r: any) => r.ParsedText).join("\n");
+  if (!extractedText || extractedText.trim().length === 0) {
+    throw new Error("O texto extraído pela API ocr.space está inteiramente vazio. Verifique a legibilidade ou formato do arquivo.");
+  }
+
+  return extractedText;
+}
 
 // Worker method to process a single item
 async function runWorker(itemToProcess: ServerQueueItem) {
@@ -174,6 +247,53 @@ async function runWorker(itemToProcess: ServerQueueItem) {
     }
 
     itemToProcess.progress = 30;
+
+    // Tenta primeiro a extração direta de texto (PDF Digital) + Regex
+    let cleanText = "";
+    let directRegexData: Record<string, any> | null = null;
+
+    if (extractionMode === 'hybrid' || extractionMode === 'direct') {
+      try {
+        console.log(`[QueueWorker] Tentando extrair texto digital para o arquivo: ${itemToProcess.fileName}`);
+        cleanText = (await extractPDFText(base64Data)) || "";
+        cleanText = cleanText.trim();
+        
+        if (cleanText.length > 25) {
+          console.log(`[QueueWorker] Texto digital encontrado (${cleanText.length} caracteres). Aplicando heurísticas regex...`);
+          directRegexData = extractFieldsWithRegex(cleanText, itemToProcess.fields);
+        }
+      } catch (err: any) {
+        console.warn(`[QueueWorker] Erro ou ausência de texto digital no arquivo ${itemToProcess.fileName}: ${err.message}`);
+      }
+    }
+
+    // Se estiver no modo Apenas Direto ou no modo Híbrido com sucesso na captura dos campos obrigatórios
+    if (directRegexData) {
+      const requiredFields = itemToProcess.fields.filter(f => f.required).map(f => f.name);
+      
+      // No modo direct, aceitamos sempre. No modo hybrid, aceitamos se tiver achado os campos obrigatórios
+      const hasAllRequired = requiredFields.every(name => {
+        const val = directRegexData ? directRegexData[name] : "";
+        return val !== undefined && val !== null && String(val).trim().length > 0;
+      });
+
+      if (extractionMode === 'direct' || (extractionMode === 'hybrid' && hasAllRequired)) {
+        console.log(`[QueueWorker] Sucesso! Usando Extração Digital Direta instantânea (Cota 0) para o arquivo: ${itemToProcess.fileName}`);
+        itemToProcess.extractedData = directRegexData;
+        itemToProcess.rawSummary = "Extraído instantaneamente offline com motor de decodificação digital (Sem IA / Sem custo / Quota impecável).";
+        itemToProcess.status = 'completed';
+        itemToProcess.progress = 100;
+        itemToProcess.processedAt = new Date().toISOString();
+        // @ts-ignore
+        itemToProcess.extractionMethod = 'direct';
+        return;
+      } else {
+        console.log(`[QueueWorker] Modo Híbrido: Texto digital parseado mas faltam campos obrigatórios. Escalando para Gemini AI.`);
+      }
+    } else if (extractionMode === 'direct') {
+      // Se for apenas direto mas não extraiu texto algum (PDF escaneado/imagem)
+      throw new Error("Este documento é uma imagem ou PDF escaneado. Como você selecionou o modo 'Apenas Texto Digital (Sem IA)', altere para o perfil Híbrido no controle para ler via Gemini.");
+    }
 
     // Build schema based on target fields
     const propertiesSchema: Record<string, any> = {};
@@ -201,42 +321,121 @@ async function runWorker(itemToProcess: ServerQueueItem) {
     // Initialize client and request Gemini
     const gemini = getGeminiClient();
 
-    // Remove potential base64 prefix
-    const cleanBase64 = base64Data.replace(/^data:application\/pdf;base64,/, "");
+    // Remove potential base64 prefix and extract dynamic mime-type (PDF or Images)
+    let mimeType = "application/pdf"; // default fallback
+    let cleanBase64 = base64Data;
+
+    const base64PartsMatch = base64Data.match(/^data:([^;]+);base64,(.*)$/);
+    if (base64PartsMatch) {
+      mimeType = base64PartsMatch[1];
+      cleanBase64 = base64PartsMatch[2];
+    } else {
+      // Fallback manual cleaning if format matches prefix-less style
+      cleanBase64 = base64Data.replace(/^data:application\/pdf;base64,/, "")
+                              .replace(/^data:image\/png;base64,/, "")
+                              .replace(/^data:image\/jpeg;base64,/, "")
+                              .replace(/^data:image\/jpg;base64,/, "")
+                              .replace(/^data:image\/webp;base64,/, "");
+      
+      const ext = itemToProcess.fileName.split('.').pop()?.toLowerCase();
+      if (ext === 'png') mimeType = 'image/png';
+      else if (ext === 'jpg' || ext === 'jpeg') mimeType = 'image/jpeg';
+      else if (ext === 'webp') mimeType = 'image/webp';
+    }
 
     const promptText = `Você é um assistente especialista em leitura de documentos, OCR e extração estruturada de dados.
-Sua tarefa é analisar o documento PDF e preencher os dados solicitados exatamente conforme definido no esquema de resposta em JSON.
+Sua tarefa é analisar o documento (PDF ou imagem) e preencher os dados solicitados exatamente conforme definido no esquema de resposta em JSON.
 
 Instruções importantes:
 1. Caso um campo não esteja explicitamente presente no documento, coloque um valor vazio ("") ou nulo.
-2. Formate datas no padrão internacional YYYY-MM-DD caso faça sentido.
+2. Formate datas no padrão brasileiro DD/MM/YYYY (exemplo: 15/05/2026) caso faça sentido.
 3. Não invente ou alucine informações. Transcreva estritamente as informações presentes de maneira fidedigna.`;
 
-    itemToProcess.progress = 60;
+    itemToProcess.progress = 55;
 
-    const response = await callGeminiWithRetry(gemini, {
-      model: 'gemini-3.5-flash',
-      contents: [
-        {
-          inlineData: {
-            mimeType: 'application/pdf',
-            data: cleanBase64
+    let response;
+    let methodUsed: 'ai' | 'ocr-space' | 'ocr-space-only' = 'ai';
+
+    if (extractionMode === 'ocr-space-only') {
+      methodUsed = 'ocr-space-only';
+      itemToProcess.retryMessage = `Chamando ocr.space (Engine: ${ocrEngine}, Idioma: ${ocrLanguage})...`;
+      const ocrText = await performOcrSpace(base64Data, ocrApiKey, ocrEngine, ocrLanguage);
+      
+      itemToProcess.progress = 80;
+      itemToProcess.retryMessage = "Processando OCR via Regras/Regex locais (Sem IA)...";
+
+      const ocrRegexData = extractFieldsWithRegex(ocrText, itemToProcess.fields);
+      
+      itemToProcess.extractedData = ocrRegexData;
+      itemToProcess.rawSummary = "Texto lido via OCR Space e mapeado por regex local (Zero custo / Sem IA).\n\nTexto Extraído:\n" + ocrText.slice(0, 450) + (ocrText.length > 450 ? "..." : "");
+      itemToProcess.status = 'completed';
+      itemToProcess.progress = 100;
+      itemToProcess.processedAt = new Date().toISOString();
+      itemToProcess.extractionMethod = 'ocr-space-only';
+      return;
+    }
+
+    if (extractionMode === 'ocr-space') {
+      methodUsed = 'ocr-space';
+      itemToProcess.retryMessage = `Chamando ocr.space (Engine: ${ocrEngine}, Idioma: ${ocrLanguage})...`;
+      const ocrText = await performOcrSpace(base64Data, ocrApiKey, ocrEngine, ocrLanguage);
+      
+      itemToProcess.progress = 75;
+      itemToProcess.retryMessage = "Texto OCR obtido! Solicitando estruturação do Gemini...";
+
+      const promptWithOcrText = `Você é um assistente especialista em leitura de documentos, OCR e extração estruturada de dados.
+Sua tarefa é analisar o texto extraído de uma fatura/documento pelo leitor óptico ocr.space e preencher os dados solicitados exatamente conforme definido no esquema de resposta em JSON.
+
+Texto extraído por OCR ocr.space:
+------------------------------------------
+${ocrText}
+------------------------------------------
+
+Instruções importantes:
+1. Caso um campo não esteja explicitamente presente no documento, coloque um valor vazio ("") ou nulo.
+2. Formate datas no padrão brasileiro DD/MM/YYYY (exemplo: 15/05/2026) caso faça sentido.
+3. Não invente ou alucine informações. Transcreva estritamente as informações presentes de maneira fidedigna.`;
+
+      response = await callGeminiWithRetry(gemini, {
+        model: 'gemini-3.5-flash',
+        contents: [promptWithOcrText],
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: propertiesSchema,
+            required: requiredList
           }
-        },
-        promptText
-      ],
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: propertiesSchema,
-          required: requiredList
         }
-      }
-    }, 6, (msg) => {
-      // Atualizar mensagem de reporte que vai pro poll do front-end
-      itemToProcess.retryMessage = msg;
-    });
+      }, maxRetries, (msg) => {
+        itemToProcess.retryMessage = msg;
+      });
+    } else {
+      methodUsed = 'ai';
+      response = await callGeminiWithRetry(gemini, {
+        model: 'gemini-3.5-flash',
+        contents: [
+          {
+            inlineData: {
+              mimeType: mimeType,
+              data: cleanBase64
+            }
+          },
+          promptText
+        ],
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: propertiesSchema,
+            required: requiredList
+          }
+        }
+      }, maxRetries, (msg) => {
+        // Atualizar mensagem de reporte que vai pro poll do front-end
+        itemToProcess.retryMessage = msg;
+      });
+    }
 
     itemToProcess.progress = 85;
     itemToProcess.retryMessage = undefined;
@@ -261,6 +460,8 @@ Instruções importantes:
           const rawStr = String(value).trim();
           // Keep digits, comma or dot
           extracted[field.name] = rawStr;
+        } else if (field.type === 'date') {
+          extracted[field.name] = standardizeDate(String(value));
         } else {
           extracted[field.name] = String(value).trim();
         }
@@ -274,6 +475,8 @@ Instruções importantes:
     itemToProcess.status = 'completed';
     itemToProcess.progress = 100;
     itemToProcess.processedAt = new Date().toISOString();
+    // @ts-ignore
+    itemToProcess.extractionMethod = methodUsed;
 
   } catch (error: any) {
     console.error("Erro no processamento do item:", itemToProcess.fileName, error);
@@ -301,6 +504,11 @@ Instruções importantes:
 
 // Queue workers manager
 async function processQueue() {
+  if (isQueuePaused) {
+    console.log("[Queue] Processamento pausado temporariamente pelo painel.");
+    return;
+  }
+
   while (activeWorkers < maxConcurrency) {
     const itemToProcess = queue.find(item => item.status === 'pending');
     if (!itemToProcess) break;
@@ -338,6 +546,7 @@ async function startServer() {
         status: 'pending',
         progress: 0,
         uploadedAt: new Date().toISOString(),
+        extractionMethod: extractionMode as any,
         fields
       };
 
@@ -379,7 +588,8 @@ async function startServer() {
         extractedData: item.extractedData,
         rawSummary: item.rawSummary,
         uploadedAt: item.uploadedAt,
-        processedAt: item.processedAt
+        processedAt: item.processedAt,
+        extractionMethod: item.extractionMethod
       }))
     });
   });
@@ -417,6 +627,7 @@ async function startServer() {
     item.status = 'pending';
     item.progress = 0;
     item.error = undefined;
+    item.extractionMethod = extractionMode as any;
     fileContentsMap.set(id, base64Data);
 
     // Trigger processing
@@ -449,22 +660,69 @@ async function startServer() {
 
   // Get/Set processing delay configurations
   app.get("/api/queue/settings", (req, res) => {
-    res.json({ delayMs: queueDelayMs, maxConcurrency });
+    res.json({
+      delayMs: queueDelayMs,
+      maxConcurrency,
+      extractionMode,
+      isQueuePaused,
+      maxRetries,
+      ocrApiKey,
+      ocrEngine,
+      ocrLanguage
+    });
   });
 
   app.post("/api/queue/settings", (req, res) => {
-    const { delayMs, maxConcurrency: targetConcurrency } = req.body;
+    const {
+      delayMs,
+      maxConcurrency: targetConcurrency,
+      extractionMode: targetMode,
+      isQueuePaused: targetPause,
+      maxRetries: targetRetries,
+      ocrApiKey: targetApiKey,
+      ocrEngine: targetEngine,
+      ocrLanguage: targetLanguage
+    } = req.body;
+
     if (typeof delayMs === 'number' && delayMs >= 0) {
       queueDelayMs = delayMs;
     }
     if (typeof targetConcurrency === 'number' && targetConcurrency >= 1) {
       maxConcurrency = targetConcurrency;
     }
+    if (targetMode === 'hybrid' || targetMode === 'direct' || targetMode === 'ai' || targetMode === 'ocr-space' || targetMode === 'ocr-space-only') {
+      extractionMode = targetMode;
+    }
+    if (typeof targetPause === 'boolean') {
+      isQueuePaused = targetPause;
+    }
+    if (typeof targetRetries === 'number' && targetRetries >= 0) {
+      maxRetries = targetRetries;
+    }
+    if (typeof targetApiKey === 'string') {
+      ocrApiKey = targetApiKey;
+    }
+    if (typeof targetEngine === 'string') {
+      ocrEngine = targetEngine;
+    }
+    if (typeof targetLanguage === 'string') {
+      ocrLanguage = targetLanguage;
+    }
     
-    // Trigger queue in case concurrency has been raised
+    // Trigger queue in case concurrency/pause state has been changed
     processQueue().catch(console.error);
 
-    res.json({ success: true, delayMs: queueDelayMs, maxConcurrency });
+    res.json({
+      success: true,
+      delayMs: queueDelayMs,
+      maxConcurrency,
+      extractionMode,
+      isQueuePaused,
+      maxRetries,
+      ocrApiKey,
+      ocrEngine,
+      ocrLanguage
+    });
   });
 
   // Vite development integration or static serving

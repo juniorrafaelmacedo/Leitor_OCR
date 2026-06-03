@@ -70,7 +70,7 @@ const PRESETS = [
 ];
 
 export const TemplateSelector: React.FC<TemplateSelectorProps> = ({ fields, onFieldsChange }) => {
-  const [activePreset, setActivePreset] = useState<string>('invoices');
+  const [activePreset, setActivePreset] = useState<string>('energy_bills');
   const [editingField, setEditingField] = useState<Partial<ExtractionField>>({
     name: '',
     label: '',
