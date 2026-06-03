@@ -7,23 +7,27 @@ import { extractPDFText, extractFieldsWithRegex, standardizeDate } from "./pdf_p
 
 dotenv.config();
 
-// Ensure Gemini Client is initialized with process.env.GEMINI_API_KEY
+// Ensure Gemini Client is initialized with process.env.GEMINI_API_KEY or custom key
 // Use lazy instantiation or wrap it carefully so we handle missing keys gracefully.
 let ai: GoogleGenAI | null = null;
+let geminiApiKey = "";
+let activeGeminiApiKeyUsed = "";
+
 function getGeminiClient(): GoogleGenAI {
-  if (!ai) {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      throw new Error("GEMINI_API_KEY não foi configurada nos Secrets da aplicação. Por favor, adicione-a no menu Settings > Secrets para utilizar a extração inteligente.");
-    }
+  const currentKey = geminiApiKey || process.env.GEMINI_API_KEY;
+  if (!currentKey) {
+    throw new Error("GEMINI_API_KEY não foi configurada nos Secrets da aplicação ou fornecida pelo usuário. Adicione a sua Chave de API nas Configurações Avançadas.");
+  }
+  if (!ai || activeGeminiApiKeyUsed !== currentKey) {
     ai = new GoogleGenAI({
-      apiKey,
+      apiKey: currentKey,
       httpOptions: {
         headers: {
           'User-Agent': 'aistudio-build',
         },
       },
     });
+    activeGeminiApiKeyUsed = currentKey;
   }
   return ai;
 }
@@ -79,11 +83,9 @@ async function callGeminiWithRetry(
           sleepMs = Math.min(30000, (7 + attempt * 4) * 1000); // teto de 30s
           
           if (currentModel === 'gemini-3.5-flash') {
-            currentModel = 'gemini-2.5-flash';
-          } else if (currentModel === 'gemini-2.1-flash' || currentModel === 'gemini-2.5-flash') {
-            currentModel = 'gemini-1.5-flash';
+            currentModel = 'gemini-3.1-flash-lite';
           } else {
-            currentModel = 'gemini-1.5-flash';
+            currentModel = 'gemini-3.5-flash';
           }
           onRetry?.(`Instabilidade temporária (503). Mudando para o modelo [${currentModel}] em ${sleepMs / 1000}s...`);
         }
@@ -168,6 +170,7 @@ let ocrApiKey = "K88221884388957";
 let ocrEngine = "2";
 let ocrLanguage = "por";
 let googleVisionApiKey = process.env.GOOGLE_CLOUD_VISION_API_KEY || "";
+let adminPassword = process.env.ADMIN_PASSWORD || "";
 
 async function performGoogleVisionOcr(
   base64Data: string,
@@ -414,15 +417,23 @@ async function runWorker(itemToProcess: ServerQueueItem) {
         cleanText = cleanText.trim();
         
         if (cleanText.length > 50) {
-          isDigitalPdf = true;
-          console.log(`[QueueWorker] Texto digital obtido localmente (${cleanText.length} caracteres).`);
+          // Verify if this is a complete digital invoice by running local regex first
+          const testData = extractFieldsWithRegex(cleanText, itemToProcess.fields);
+          const hasCriticalData = testData && testData['numero_instalacao'] && testData['consumo_kwh'];
+          
+          if (hasCriticalData) {
+            isDigitalPdf = true;
+            console.log(`[QueueWorker] Texto digital completo e válido obtido localmente (${cleanText.length} caracteres).`);
+          } else {
+            console.log(`[QueueWorker] Texto digital incompleto obtido (provável PDF escaneado com folha de protocolo digital). Tratando como PDF escaneado.`);
+          }
         }
       } catch (err: any) {
         console.warn(`[QueueWorker] Erro ao tentar extrair texto digital direto para ${itemToProcess.fileName}: ${err.message}`);
       }
     }
 
-    if (extractionMode === 'direct' || (extractionMode === 'ocr-space-only' && isDigitalPdf)) {
+    if (extractionMode === 'direct' || (extractionMode === 'ocr-space-only' && isDigitalPdf) || (extractionMode === 'google-vision-only' && isDigitalPdf)) {
       if (cleanText.length > 25) {
         console.log(`[QueueWorker] Texto digital encontrado. Aplicando heurísticas regex locais...`);
         directRegexData = extractFieldsWithRegex(cleanText, itemToProcess.fields);
@@ -431,12 +442,12 @@ async function runWorker(itemToProcess: ServerQueueItem) {
       if (directRegexData) {
         console.log(`[QueueWorker] Sucesso! Usando Extração Digital Direta instantânea (Cota 0) para o arquivo: ${itemToProcess.fileName}`);
         itemToProcess.extractedData = directRegexData;
-        itemToProcess.rawSummary = "Extraído offline por decodificador digital direto e mapeamento Regex local (Custo Zero total, sem usar IA ou OCR Space).";
+        itemToProcess.rawSummary = "Extraído offline por decodificador digital direto e mapeamento Regex local (Custo Zero total, sem usar IA ou OCR Space/Vision).";
         itemToProcess.status = 'completed';
         itemToProcess.progress = 100;
         itemToProcess.processedAt = new Date().toISOString();
         // @ts-ignore
-        itemToProcess.extractionMethod = 'ocr-space-only';
+        itemToProcess.extractionMethod = extractionMode;
         return;
       } else {
         if (extractionMode === 'direct') {
@@ -451,9 +462,27 @@ async function runWorker(itemToProcess: ServerQueueItem) {
     const requiredList: string[] = [];
 
     itemToProcess.fields.forEach((f) => {
+      let desc = f.description || `O valor correspondente ao campo de ${f.label}`;
+      const fieldName = f.name.toLowerCase();
+      
+      // Enrich descriptions dynamically to guarantee pristine extraction accuracy
+      if (fieldName === 'numero_instalacao') {
+        desc += " (Refere-se ao 'Número da Instalação', 'Unidade Consumidora', 'Código Único', 'Código de Cliente', 'Código', 'UC' ou 'Contrato' da distribuidora (Enel, CPFL, Light, Neoenergia, Elektro, Energisa, Cemig). Busque por campos com esses rótulos e retorne exatamente este número identificador. NÃO confunda com CNPJ ou com o número de nota fiscal.)";
+      } else if (fieldName === 'mes_referencia') {
+        desc += " (Ex: 05/2026, 11/2025 ou NOV/25, no formato brasileiro padrão MM/AAAA. Refere-se à competência ou período faturado. Extraia exatamente o mês e ano correspondente de faturamento.)";
+      } else if (fieldName === 'data_vencimento') {
+        desc += " (Refere-se ao vencimento da conta, prazo final, ou 'Vencimento'. Deve ser retornado estritamente no formato DD/MM/AAAA. NÃO retorne a data de emissão ou data de apresentação por engano!)";
+      } else if (fieldName === 'valor_total') {
+        desc += " (O valor monetário total real a pagar desta fatura em Reais. Busque por termos como 'Valor Total', 'Total a Pagar', 'Valor Líquido' ou 'Total do Documento'. Exclua faturamentos parciais de bandeiras ou tarifas unitárias individuais menores como 0.52 etc.)";
+      } else if (fieldName === 'consumo_kwh') {
+        desc += " (A quantidade física real de faturado de energia ativa consumida em kWh, ex: '325', '1450', etc. NÃO extraia tarifas unitárias de energia como 0.85 ou 0.42. O valor ideal está geralmente nas linhas ativas de faturamento TUSD e TE, ou em seções como 'Consumo do Mês' ou 'Consumo kWh'.)";
+      } else if (fieldName === 'concessionaria') {
+        desc += " (Identifique o nome da empresa distribuidora de energia que emite a fatura, ex: Enel, CPFL, Elektro, Energisa, Light, Neoenergia, Cemig, Copel, RGE, etc.)";
+      }
+
       propertiesSchema[f.name] = {
         type: Type.STRING, // Use STRING to preserve OCR symbols and flexible format structures
-        description: f.description || `O valor correspondente ao campo de ${f.label}`
+        description: desc
       };
       if (f.required) {
         requiredList.push(f.name);
@@ -899,20 +928,35 @@ async function startServer() {
 
   // Get/Set processing delay configurations
   app.get("/api/queue/settings", (req, res) => {
+    const clientProvidedPassword = req.headers['x-admin-password'] || req.query.password || "";
+    const isUnlocked = !adminPassword || clientProvidedPassword === adminPassword;
+
     res.json({
       delayMs: queueDelayMs,
       maxConcurrency,
       extractionMode,
       isQueuePaused,
       maxRetries,
-      ocrApiKey,
       ocrEngine,
       ocrLanguage,
-      googleVisionApiKey
+      hasAdminPassword: !!adminPassword,
+      isUnlocked,
+      // Only return original keys if unlocked, otherwise mask them
+      ocrApiKey: isUnlocked ? ocrApiKey : (ocrApiKey ? "••••••••••••••••" : ""),
+      googleVisionApiKey: isUnlocked ? googleVisionApiKey : (googleVisionApiKey ? "••••••••••••••••" : ""),
+      geminiApiKey: isUnlocked ? geminiApiKey : (geminiApiKey ? "••••••••••••••••" : ""),
+      isUsingDefaultGemini: !geminiApiKey && !!process.env.GEMINI_API_KEY
     });
   });
 
   app.post("/api/queue/settings", (req, res) => {
+    const clientProvidedPassword = req.headers['x-admin-password'] || req.body.adminPasswordConfirm || "";
+    const isUnlocked = !adminPassword || clientProvidedPassword === adminPassword;
+
+    if (!isUnlocked) {
+      return res.status(403).json({ error: "Área de configurações protegida por senha administrativa." });
+    }
+
     const {
       delayMs,
       maxConcurrency: targetConcurrency,
@@ -922,7 +966,9 @@ async function startServer() {
       ocrApiKey: targetApiKey,
       ocrEngine: targetEngine,
       ocrLanguage: targetLanguage,
-      googleVisionApiKey: targetVisionApiKey
+      googleVisionApiKey: targetVisionApiKey,
+      geminiApiKey: targetGeminiApiKey,
+      adminPassword: newAdminPassword
     } = req.body;
 
     if (typeof delayMs === 'number' && delayMs >= 0) {
@@ -940,7 +986,7 @@ async function startServer() {
     if (typeof targetRetries === 'number' && targetRetries >= 0) {
       maxRetries = targetRetries;
     }
-    if (typeof targetApiKey === 'string') {
+    if (typeof targetApiKey === 'string' && targetApiKey !== "••••••••••••••••") {
       ocrApiKey = targetApiKey;
     }
     if (typeof targetEngine === 'string') {
@@ -949,8 +995,14 @@ async function startServer() {
     if (typeof targetLanguage === 'string') {
       ocrLanguage = targetLanguage;
     }
-    if (typeof targetVisionApiKey === 'string') {
+    if (typeof targetVisionApiKey === 'string' && targetVisionApiKey !== "••••••••••••••••") {
       googleVisionApiKey = targetVisionApiKey;
+    }
+    if (typeof targetGeminiApiKey === 'string' && targetGeminiApiKey !== "••••••••••••••••") {
+      geminiApiKey = targetGeminiApiKey;
+    }
+    if (typeof newAdminPassword === 'string') {
+      adminPassword = newAdminPassword;
     }
     
     // Trigger queue in case concurrency/pause state has been changed
@@ -963,10 +1015,14 @@ async function startServer() {
       extractionMode,
       isQueuePaused,
       maxRetries,
-      ocrApiKey,
       ocrEngine,
       ocrLanguage,
-      googleVisionApiKey
+      hasAdminPassword: !!adminPassword,
+      isUnlocked: true,
+      ocrApiKey,
+      googleVisionApiKey,
+      geminiApiKey: isUnlocked ? geminiApiKey : (geminiApiKey ? "••••••••••••••••" : ""),
+      isUsingDefaultGemini: !geminiApiKey && !!process.env.GEMINI_API_KEY
     });
   });
 

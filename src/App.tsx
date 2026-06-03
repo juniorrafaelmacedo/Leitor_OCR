@@ -36,6 +36,15 @@ export default function App() {
   // google cloud vision parameters
   const [googleVisionApiKey, setGoogleVisionApiKey] = useState<string>('');
 
+  // gemini parameters
+  const [geminiApiKey, setGeminiApiKey] = useState<string>('');
+  const [isUsingDefaultGemini, setIsUsingDefaultGemini] = useState<boolean>(true);
+
+  // Password-protection states for API key visibility
+  const [hasAdminPassword, setHasAdminPassword] = useState<boolean>(false);
+  const [isUnlocked, setIsUnlocked] = useState<boolean>(true);
+  const [userPassword, setUserPassword] = useState<string>(() => sessionStorage.getItem('admin_session_pwd') || '');
+
   // In-memory reference mapping QueueItem ID to Base64 file contents to enable retrying from catalog rows
   const fileBase64sRef = useRef<Record<string, string>>({});
 
@@ -53,7 +62,10 @@ export default function App() {
 
   const fetchSettings = async () => {
     try {
-      const res = await fetch('/api/queue/settings');
+      const storedPwd = sessionStorage.getItem('admin_session_pwd') || '';
+      const res = await fetch(`/api/queue/settings?password=${encodeURIComponent(storedPwd)}`, {
+        headers: { 'X-Admin-Password': storedPwd }
+      });
       const contentType = res.headers.get('content-type') || '';
       if (!res.ok || !contentType.includes('application/json')) {
         setIsServerOffline(true);
@@ -88,10 +100,22 @@ export default function App() {
         if (typeof data.googleVisionApiKey === 'string') {
           setGoogleVisionApiKey(data.googleVisionApiKey);
         }
+        if (typeof data.geminiApiKey === 'string') {
+          setGeminiApiKey(data.geminiApiKey);
+        }
+        if (typeof data.isUsingDefaultGemini === 'boolean') {
+          setIsUsingDefaultGemini(data.isUsingDefaultGemini);
+        }
+        if (typeof data.hasAdminPassword === 'boolean') {
+          setHasAdminPassword(data.hasAdminPassword);
+        }
+        if (typeof data.isUnlocked === 'boolean') {
+          setIsUnlocked(data.isUnlocked);
+        }
         setIsServerOffline(false);
       }
     } catch (e) {
-      console.error("Erro ao carregar configurações de delay:", e);
+      console.error("Erro ao carregar configurações:", e);
       setIsServerOffline(true);
     }
   };
@@ -106,16 +130,27 @@ export default function App() {
     ocrEngine?: string;
     ocrLanguage?: string;
     googleVisionApiKey?: string;
+    geminiApiKey?: string;
+    adminPassword?: string;
   }) => {
     try {
+      const storedPwd = sessionStorage.getItem('admin_session_pwd') || '';
+      const bodyWithConfirm = {
+        ...updates,
+        adminPasswordConfirm: storedPwd
+      };
       const res = await fetch('/api/queue/settings', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updates)
+        headers: { 
+          'Content-Type': 'application/json',
+          'X-Admin-Password': storedPwd
+        },
+        body: JSON.stringify(bodyWithConfirm)
       });
       const contentType = res.headers.get('content-type') || '';
       if (!res.ok || !contentType.includes('application/json')) {
-        throw new Error("O servidor de backend não respondeu com JSON na atualização do delay.");
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.error || "O servidor de backend não pôde atualizar as configurações.");
       }
       const data = await res.json();
       if (data.success) {
@@ -142,11 +177,41 @@ export default function App() {
         if (typeof data.googleVisionApiKey === 'string') {
           setGoogleVisionApiKey(data.googleVisionApiKey);
         }
+        if (typeof data.geminiApiKey === 'string') {
+          setGeminiApiKey(data.geminiApiKey);
+        }
+        if (typeof data.isUsingDefaultGemini === 'boolean') {
+          setIsUsingDefaultGemini(data.isUsingDefaultGemini);
+        }
+        if (typeof data.hasAdminPassword === 'boolean') {
+          setHasAdminPassword(data.hasAdminPassword);
+        }
+        if (typeof data.isUnlocked === 'boolean') {
+          setIsUnlocked(data.isUnlocked);
+        }
         setIsServerOffline(false);
       }
-    } catch (e) {
-      console.error("Erro ao atualizar delay:", e);
+    } catch (e: any) {
+      console.error("Erro ao atualizar configurações:", e);
+      alert(e.message || "Erro ao salvar alterações.");
     }
+  };
+
+  const handleUnlock = (password: string) => {
+    sessionStorage.setItem('admin_session_pwd', password);
+    setUserPassword(password);
+    setTimeout(() => {
+      fetchSettings();
+    }, 50);
+  };
+
+  const handleLock = () => {
+    sessionStorage.removeItem('admin_session_pwd');
+    setUserPassword('');
+    setIsUnlocked(false);
+    setTimeout(() => {
+      fetchSettings();
+    }, 50);
   };
 
   const fetchQueue = async () => {
@@ -529,9 +594,15 @@ export default function App() {
               ocrEngine={ocrEngine}
               ocrLanguage={ocrLanguage}
               googleVisionApiKey={googleVisionApiKey}
+              geminiApiKey={geminiApiKey}
+              isUsingDefaultGemini={isUsingDefaultGemini}
               onUpdateSettings={handleUpdateSettings}
               onRetryAllFailed={handleRetryAllFailed}
               onRetryRow={handleRetryRow}
+              hasAdminPassword={hasAdminPassword}
+              isUnlocked={isUnlocked}
+              onUnlock={handleUnlock}
+              onLock={handleLock}
             />
           </div>
         </div>

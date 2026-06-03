@@ -16,6 +16,8 @@ interface QueueViewerProps {
   ocrEngine?: string;
   ocrLanguage?: string;
   googleVisionApiKey?: string;
+  geminiApiKey?: string;
+  isUsingDefaultGemini?: boolean;
   onUpdateSettings?: (updates: {
     delayMs?: number;
     maxConcurrency?: number;
@@ -26,9 +28,15 @@ interface QueueViewerProps {
     ocrEngine?: string;
     ocrLanguage?: string;
     googleVisionApiKey?: string;
+    geminiApiKey?: string;
+    adminPassword?: string;
   }) => void;
   onRetryAllFailed?: () => void;
   onRetryRow?: (id: string) => void;
+  hasAdminPassword?: boolean;
+  isUnlocked?: boolean;
+  onUnlock?: (password: string) => void;
+  onLock?: () => void;
 }
 
 export const QueueViewer: React.FC<QueueViewerProps> = ({
@@ -45,12 +53,24 @@ export const QueueViewer: React.FC<QueueViewerProps> = ({
   ocrEngine = '2',
   ocrLanguage = 'por',
   googleVisionApiKey = '',
+  geminiApiKey = '',
+  isUsingDefaultGemini = true,
   onUpdateSettings,
   onRetryAllFailed,
   onRetryRow,
+  hasAdminPassword = false,
+  isUnlocked = true,
+  onUnlock,
+  onLock,
 }) => {
   const [isDragActive, setIsDragActive] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showOcrKey, setShowOcrKey] = useState(false);
+  const [showVisionKey, setShowVisionKey] = useState(false);
+  const [showGeminiKey, setShowGeminiKey] = useState(false);
+  const [typedPassword, setTypedPassword] = useState('');
+  const [newAdminPassword, setNewAdminPassword] = useState('');
+  const [showConfigPwd, setShowConfigPwd] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const activeAndPendingCount = stats.pending + stats.processing;
@@ -301,101 +321,199 @@ export const QueueViewer: React.FC<QueueViewerProps> = ({
         {/* OCR Space parameters integrated directly when an OCR mode is chosen (so they are simple and context-aware!) */}
         {(extractionMode === 'ocr-space' || extractionMode === 'ocr-space-only') && (
           <div className="mt-3.5 p-3 bg-white border-2 border-dark-900 shadow-[2px_2px_0px_0px_rgba(20,20,20,1)] text-[#141414] font-mono">
-            <div className="text-[10px] font-bold uppercase text-brand-orange border-b border-dark-900/10 pb-1.5 mb-2.5 flex items-center gap-1.5">
+            <div className="text-[10px] font-bold uppercase text-brand-orange border-b border-dark-900/10 pb-1.5 mb-2.5 flex items-center justify-between gap-1.5">
               <span>⚙️ PARÂMETROS OBRIGATÓRIOS DO OCR.SPACE</span>
+              {!isUnlocked && <span className="text-[8px] bg-red-800 text-white px-1 py-0.2 uppercase font-black tracking-wider">Área Bloqueada</span>}
             </div>
             
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              {/* API Key */}
-              <div>
-                <label className="block text-[8.5px] font-black uppercase mb-1">Chave de API ocr.space:</label>
-                <input
-                  type="text"
-                  value={ocrApiKey}
-                  onChange={(e) => onUpdateSettings?.({ ocrApiKey: e.target.value })}
-                  placeholder="Insira sua Chave de API"
-                  className="w-full bg-sand-100 border-2 border-dark-900 text-[#141414] px-2 py-1 text-[10px] font-mono font-bold focus:bg-white focus:outline-none"
-                />
-                <span className="text-[7.5px] text-dark-900/60 mt-0.5 block font-bold">Padrão PRO: K88221884388957</span>
+            {!isUnlocked ? (
+              <div className="bg-sand-150 border-2 border-dashed border-dark-900/50 p-4 text-center space-y-2">
+                <div className="text-base">🔐</div>
+                <div className="space-y-1">
+                  <span className="text-[9.5px] uppercase font-black block">Parâmetros de OCR Bloqueados</span>
+                  <p className="text-[8.5px] text-dark-900/70 max-w-sm mx-auto leading-normal">
+                    Este ambiente está protegido para produção. Digite seu código de identificação administrativa para liberar visualização e edições das chaves.
+                  </p>
+                </div>
+                <div className="flex max-w-xs mx-auto gap-1">
+                  <input
+                    type="password"
+                    placeholder="Senha do Administrador"
+                    value={typedPassword}
+                    onChange={(e) => setTypedPassword(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        onUnlock?.(typedPassword);
+                        setTypedPassword('');
+                      }
+                    }}
+                    className="grow bg-white border-2 border-dark-900 text-[#141414] px-2 py-0.5 text-[9px] font-bold focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onUnlock?.(typedPassword);
+                      setTypedPassword('');
+                    }}
+                    className="bg-brand-orange text-dark-900 border-2 border-dark-900 px-2.5 py-0.5 text-[8.5px] font-black uppercase tracking-wider hover:bg-white cursor-pointer select-none"
+                  >
+                    Desbloquear
+                  </button>
+                </div>
               </div>
+            ) : (
+              <>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  {/* API Key */}
+                  <div>
+                    <label className="block text-[8.5px] font-black uppercase mb-1">Chave de API ocr.space:</label>
+                    <div className="relative">
+                      <input
+                        type={showOcrKey ? "text" : "password"}
+                        value={ocrApiKey}
+                        onChange={(e) => onUpdateSettings?.({ ocrApiKey: e.target.value })}
+                        placeholder="Insira sua Chave de API"
+                        className="w-full bg-sand-100 border-2 border-dark-900 text-[#141414] pl-2 pr-14 py-1 text-[10px] font-mono font-bold focus:bg-white focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowOcrKey(!showOcrKey)}
+                        className="absolute right-1 top-1 bottom-1 px-1.5 py-0 text-[8px] font-black uppercase tracking-wider bg-dark-900 text-sand-100 hover:bg-brand-orange hover:text-dark-950 transition-colors cursor-pointer select-none"
+                      >
+                        {showOcrKey ? "Ocultar" : "Mostrar"}
+                      </button>
+                    </div>
+                    <span className="text-[7.5px] text-dark-900/60 mt-0.5 block font-bold">Padrão PRO: K88221884388957</span>
+                  </div>
 
-              {/* OCR Engine Selection */}
-              <div>
-                <label className="block text-[8.5px] font-black uppercase mb-1">Motor OCR (Engine):</label>
-                <select
-                  value={ocrEngine}
-                  onChange={(e) => onUpdateSettings?.({ ocrEngine: e.target.value })}
-                  className="w-full bg-sand-100 border-2 border-dark-900 text-[#141414] px-2 py-1 text-[10px] font-mono font-bold focus:bg-white focus:outline-none cursor-pointer"
-                >
-                  <option value="1">Engine 1 (Padrão Geral)</option>
-                  <option value="2">Engine 2 (Otimizado p/ Números e Faturas)</option>
-                  <option value="3">Engine 3 (Velocidade e Letras Pequenas)</option>
-                </select>
-                <span className="text-[7.5px] text-dark-900/60 mt-0.5 block">Recomendado: Engine 2</span>
-              </div>
+                  {/* OCR Engine Selection */}
+                  <div>
+                    <label className="block text-[8.5px] font-black uppercase mb-1">Motor OCR (Engine):</label>
+                    <select
+                      value={ocrEngine}
+                      onChange={(e) => onUpdateSettings?.({ ocrEngine: e.target.value })}
+                      className="w-full bg-sand-100 border-2 border-dark-900 text-[#141414] px-2 py-1 text-[10px] font-mono font-bold focus:bg-white focus:outline-none cursor-pointer"
+                    >
+                      <option value="1">Engine 1 (Padrão Geral)</option>
+                      <option value="2">Engine 2 (Otimizado p/ Números e Faturas)</option>
+                      <option value="3">Engine 3 (Velocidade e Letras Pequenas)</option>
+                    </select>
+                    <span className="text-[7.5px] text-dark-900/60 mt-0.5 block">Recomendado: Engine 2</span>
+                  </div>
 
-              {/* Language Selection */}
-              <div>
-                <label className="block text-[8.5px] font-black uppercase mb-1">Idioma do Documento:</label>
-                <select
-                  value={ocrLanguage}
-                  onChange={(e) => onUpdateSettings?.({ ocrLanguage: e.target.value })}
-                  className="w-full bg-sand-100 border-2 border-dark-900 text-[#141414] px-2 py-1 text-[10px] font-mono font-bold focus:bg-white focus:outline-none cursor-pointer"
-                >
-                  <option value="por">Português (por)</option>
-                  <option value="eng">Inglês (eng)</option>
-                  <option value="spa">Espanhol (spa)</option>
-                </select>
-                <span className="text-[7.5px] text-dark-900/60 mt-0.5 block">Identifica acentos locais</span>
-              </div>
-            </div>
+                  {/* Language Selection */}
+                  <div>
+                    <label className="block text-[8.5px] font-black uppercase mb-1">Idioma do Documento:</label>
+                    <select
+                      value={ocrLanguage}
+                      onChange={(e) => onUpdateSettings?.({ ocrLanguage: e.target.value })}
+                      className="w-full bg-sand-100 border-2 border-dark-900 text-[#141414] px-2 py-1 text-[10px] font-mono font-bold focus:bg-white focus:outline-none cursor-pointer"
+                    >
+                      <option value="por">Português (por)</option>
+                      <option value="eng">Inglês (eng)</option>
+                      <option value="spa">Espanhol (spa)</option>
+                    </select>
+                    <span className="text-[7.5px] text-dark-900/60 mt-0.5 block">Identifica acentos locais</span>
+                  </div>
+                </div>
 
-            <div className="mt-2.5 pt-2 border-t border-dark-900/10 flex items-start gap-1 text-[8.5px] text-dark-900/70 leading-normal">
-              <span>💡</span>
-              <span>
-                {extractionMode === 'ocr-space-only' ? (
-                  <><strong>Escalonamento Ativo:</strong> O lote tentará rodar 100% de graça com OCR Space + Regex local. Se o arquivo passar de 1MB, o OCR ficar indisponível ou se faltarem campos críticos (UC, valor, referência), a IA do Gemini assume o fluxo para garantir um resultado perfeito!</>
-                ) : (
-                  <><strong>OCR + IA Super Resiliente:</strong> Combina o leitor óptico OCR Space com a estruturação inteligente do Gemini 3.5. Caso a API de OCR tenha qualquer interrupção, o arquivo é processado automaticamente e por completo via visão computacional direta do Gemini.</>
-                )}
-              </span>
-            </div>
+                <div className="mt-2.5 pt-2 border-t border-dark-900/10 flex items-start gap-1 text-[8.5px] text-dark-900/70 leading-normal">
+                  <span>💡</span>
+                  <span>
+                    {extractionMode === 'ocr-space-only' ? (
+                      <><strong>Escalonamento Ativo:</strong> O lote tentará rodar 100% de graça com OCR Space + Regex local. Se o arquivo passar de 1MB, o OCR ficar indisponível ou se faltarem campos críticos (UC, valor, referência), a IA do Gemini assume o fluxo para garantir um resultado perfeito!</>
+                    ) : (
+                      <><strong>OCR + IA Super Resiliente:</strong> Combina o leitor óptico OCR Space com a estruturação inteligente do Gemini 3.5. Caso a API de OCR tenha qualquer interrupção, o arquivo é processado automaticamente e por completo via visão computacional direta do Gemini.</>
+                    )}
+                  </span>
+                </div>
+              </>
+            )}
           </div>
         )}
 
         {/* Google Vision parameters integrated directly when a Google Vision mode is chosen! */}
         {(extractionMode === 'google-vision' || extractionMode === 'google-vision-only') && (
           <div className="mt-3.5 p-3 bg-white border-2 border-dark-900 shadow-[2px_2px_0px_0px_rgba(20,20,20,1)] text-[#141414] font-mono">
-            <div className="text-[10px] font-bold uppercase text-brand-orange border-b border-dark-900/10 pb-1.5 mb-2.5 flex items-center gap-1.5">
+            <div className="text-[10px] font-bold uppercase text-brand-orange border-b border-dark-900/10 pb-1.5 mb-2.5 flex items-center justify-between gap-1.5">
               <span>👁️ PARÂMETROS OBRIGATÓRIOS DO GOOGLE CLOUD VISION API</span>
+              {!isUnlocked && <span className="text-[8px] bg-red-800 text-white px-1 py-0.2 uppercase font-black tracking-wider">Área Bloqueada</span>}
             </div>
             
-            <div className="space-y-2">
-              <div>
-                <label className="block text-[8.5px] font-black uppercase mb-1">Chave de API do Google Cloud (Vision API):</label>
-                <input
-                  type="text"
-                  value={googleVisionApiKey}
-                  onChange={(e) => onUpdateSettings?.({ googleVisionApiKey: e.target.value })}
-                  placeholder="Insira sua Chave de API Google Vision"
-                  className="w-full bg-sand-100 border-2 border-dark-900 text-[#141414] px-2 py-1.5 text-[10px] font-mono font-bold focus:bg-white focus:outline-none"
-                />
-                <span className="text-[7.5px] text-dark-900/60 mt-0.5 block font-bold">
-                  Insira a Credencial do seu Google Cloud Console com o serviço "Cloud Vision API" ativo. No seu painel do Google, o valor dessa credential está salvo sob o nome <strong className="text-brand-orange font-black">"Chave de API 1"</strong>.
-                </span>
+            {!isUnlocked ? (
+              <div className="bg-sand-150 border-2 border-dashed border-dark-900/50 p-4 text-center space-y-2">
+                <div className="text-base">🔐</div>
+                <div className="space-y-1">
+                  <span className="text-[9.5px] uppercase font-black block">Credenciais Cloud Vision Bloqueadas</span>
+                  <p className="text-[8.5px] text-dark-900/70 max-w-sm mx-auto leading-normal">
+                    Este ambiente está protegido para produção. Digite seu código de identificação administrativa para liberar visualização e edições das chaves.
+                  </p>
+                </div>
+                <div className="flex max-w-xs mx-auto gap-1">
+                  <input
+                    type="password"
+                    placeholder="Senha do Administrador"
+                    value={typedPassword}
+                    onChange={(e) => setTypedPassword(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        onUnlock?.(typedPassword);
+                        setTypedPassword('');
+                      }
+                    }}
+                    className="grow bg-white border-2 border-dark-900 text-[#141414] px-2 py-0.5 text-[9px] font-bold focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onUnlock?.(typedPassword);
+                      setTypedPassword('');
+                    }}
+                    className="bg-brand-orange text-dark-900 border-2 border-dark-900 px-2.5 py-0.5 text-[8.5px] font-black uppercase tracking-wider hover:bg-white cursor-pointer select-none"
+                  >
+                    Desbloquear
+                  </button>
+                </div>
               </div>
-            </div>
+            ) : (
+              <>
+                <div className="space-y-2">
+                  <div>
+                    <label className="block text-[8.5px] font-black uppercase mb-1">Chave de API do Google Cloud (Vision API):</label>
+                    <div className="relative">
+                      <input
+                        type={showVisionKey ? "text" : "password"}
+                        value={googleVisionApiKey}
+                        onChange={(e) => onUpdateSettings?.({ googleVisionApiKey: e.target.value })}
+                        placeholder="Insira sua Chave de API Google Vision"
+                        className="w-full bg-sand-100 border-2 border-dark-900 text-[#141414] pl-2 pr-14 py-1.5 text-[10px] font-mono font-bold focus:bg-white focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowVisionKey(!showVisionKey)}
+                        className="absolute right-1 top-1 bottom-1 px-1.5 py-0 text-[8px] font-black uppercase tracking-wider bg-dark-900 text-sand-100 hover:bg-brand-orange hover:text-dark-950 transition-colors cursor-pointer select-none"
+                      >
+                        {showVisionKey ? "Ocultar" : "Mostrar"}
+                      </button>
+                    </div>
+                    <span className="text-[7.5px] text-dark-900/60 mt-0.5 block font-bold">
+                      Insira a Credencial do seu Google Cloud Console com o serviço "Cloud Vision API" ativo. No seu painel do Google, o valor dessa credential está salvo sob o nome <strong className="text-brand-orange font-black">"Chave de API 1"</strong>.
+                    </span>
+                  </div>
+                </div>
 
-            <div className="mt-2.5 pt-2 border-t border-dark-900/10 flex items-start gap-1 text-[8.5px] text-dark-900/70 leading-normal">
-              <span>💡</span>
-              <span>
-                {extractionMode === 'google-vision-only' ? (
-                  <><strong>Somente Vision OCR:</strong> Executa a leitura computacional estrita do Google Cloud Vision e passa o texto bruto para expressões regulares locais de faturamento da Enel, CPFL, etc. 100% livre de consumo de tokens do Gemini.</>
-                ) : (
-                  <><strong>Premium Híbrido:</strong> O mais robusto detector de faturas. Ativa o motor óptico profissional de Vision para arquivos difíceis ou fotos desfocadas de aparelhos e repassa o resultado estruturado para estruturação minuciosa com IA Gemini.</>
-                )}
-              </span>
-            </div>
+                <div className="mt-2.5 pt-2 border-t border-dark-900/10 flex items-start gap-1 text-[8.5px] text-dark-900/70 leading-normal">
+                  <span>💡</span>
+                  <span>
+                    {extractionMode === 'google-vision-only' ? (
+                      <><strong>Somente Vision OCR:</strong> Executa a leitura computacional estrita do Google Cloud Vision e passa o texto bruto para expressões regulares locais de faturamento da Enel, CPFL, etc. 100% livre de consumo de tokens do Gemini.</>
+                    ) : (
+                      <><strong>Premium Híbrido:</strong> O mais robusto detector de faturas. Ativa o motor óptico profissional de Vision para arquivos difíceis ou fotos desfocadas de aparelhos e repassa o resultado estruturado para estruturação minuciosa com IA Gemini.</>
+                    )}
+                  </span>
+                </div>
+              </>
+            )}
           </div>
         )}
       </div>
@@ -404,6 +522,59 @@ export const QueueViewer: React.FC<QueueViewerProps> = ({
       {showAdvanced && (
         <div className="space-y-4 pt-1 transition-all">
           
+          {/* Gemini API custom key setup */}
+          <div className="bg-sand-200 border-2 border-dark-900 rounded-none p-4 shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] text-[#141414] font-mono">
+            <div className="text-[10px] font-bold uppercase text-brand-orange border-b border-dark-900/10 pb-1.5 mb-2.5 flex items-center justify-between gap-1.5">
+              <span className="flex items-center gap-1.5">🧠 CREDENCIAIS DE INTELIGÊNCIA ARTIFICIAL (GEMINI API)</span>
+              {!isUnlocked && <span className="text-[8px] bg-red-800 text-white px-1 py-0.2 uppercase font-black tracking-wider">Área Bloqueada</span>}
+            </div>
+
+            {!isUnlocked ? (
+              <div className="bg-sand-150 border-2 border-dashed border-dark-900/50 p-4 text-center space-y-2">
+                <div className="text-base">🔐</div>
+                <div className="space-y-1">
+                  <span className="text-[9.5px] uppercase font-black block">Chave do Gemini Bloqueada</span>
+                  <p className="text-[8.5px] text-dark-900/70 max-w-sm mx-auto leading-normal">
+                    Este ambiente de chaves está protegido. Digite sua senha administrativa para desbloquear visualização e edições.
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-2.5">
+                <div className="flex flex-col gap-1">
+                  <label className="block text-[8.5px] font-black uppercase">Sua Chave de API do Gemini:</label>
+                  <div className="relative">
+                    <input
+                      type={showGeminiKey ? "text" : "password"}
+                      value={geminiApiKey}
+                      onChange={(e) => onUpdateSettings?.({ geminiApiKey: e.target.value })}
+                      placeholder={isUsingDefaultGemini ? "Usando chave padrão do sistema (Cota de 15 faturas por vez)" : "Sua Chave de API do Gemini (AI Studio)"}
+                      className="w-full bg-sand-100 border-2 border-dark-900 text-[#141414] pl-2 pr-14 py-1.5 text-[10px] font-mono font-bold focus:bg-white focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowGeminiKey(!showGeminiKey)}
+                      className="absolute right-1 top-1 bottom-1 px-1.5 py-0 text-[8px] font-black uppercase tracking-wider bg-dark-900 text-sand-100 hover:bg-brand-orange hover:text-dark-950 transition-colors cursor-pointer select-none"
+                    >
+                      {showGeminiKey ? "Ocultar" : "Mostrar"}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex items-start gap-1.5 text-[8.5px] leading-normal text-dark-900/80">
+                  <span className="shrink-0 bg-brand-orange text-dark-950 px-1 py-px font-black select-none text-[7.5px] uppercase">Status Atual</span>
+                  <span>
+                    {isUsingDefaultGemini ? (
+                      <>Você está usando a chave do projeto público (<strong className="text-dark-950">Free Tier Limitada a 20 faturas por dia</strong>). Se receber o erro <strong>Quota Exceeded (HTTP 429)</strong>, crie uma chave grátis no <a href="https://ai.google.dev/gemini-api/docs/api-key" target="_blank" rel="noreferrer" className="underline font-bold text-brand-orange">Google AI Studio</a>, clique em Desbloquear acima e digite sua própria chave.</>
+                    ) : (
+                      <><span className="text-green-700 font-bold">🟢 Chave Personalizada Ativa:</span> Seus envios em lote estão usando a sua cota privada de alta velocidade de forma isolada.</>
+                    )}
+                  </span>
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* Rate Limits / Processing Speed Controller */}
           <div className="bg-sand-200 border-2 border-dark-900 rounded-none p-4 shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] text-dark-900 font-mono">
             <div className="flex items-center gap-1.5 mb-2">
@@ -545,6 +716,133 @@ export const QueueViewer: React.FC<QueueViewerProps> = ({
                 );
               })}
             </div>
+          </div>
+
+          {/* Security / Admin Protection Panel */}
+          <div className="bg-sand-200 border-2 border-dark-900 rounded-none p-4 shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] text-dark-900 font-mono mt-3.5">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-1.5">
+                <span className="text-brand-orange text-xs block">🔐</span>
+                <h4 className="text-xs font-bold uppercase tracking-wider">[ PROTEÇÃO DA CHAVE DE API EM PRODUÇÃO ]</h4>
+              </div>
+              {hasAdminPassword && (
+                <span className="px-1.5 py-0.2 text-[7.5px] font-black uppercase bg-green-700 text-white border border-dark-900 select-none">
+                  Proteção Ativada
+                </span>
+              )}
+            </div>
+            <p className="text-[10px] text-dark-900/75 leading-relaxed mb-3">
+              Evite que usuários finais ou visitantes leiam ou alterem as credenciais e chaves do Google Cloud Vision e OCR Space em ambiente de produção.
+            </p>
+
+            {hasAdminPassword ? (
+              <div className="space-y-3">
+                {isUnlocked ? (
+                  <div className="flex flex-col sm:flex-row items-center gap-2 justify-between bg-white border-2 border-dark-900 p-2.5 text-[10px]">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-green-600 animate-pulse font-mono">●</span>
+                      <span><strong>Sessão Autorizada:</strong> Você pode visualizar e editar as chaves de API livremente.</span>
+                    </div>
+                    <div className="flex gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (confirm("Deseja realmente REMOVER a proteção por senha administrativa? As chaves voltarão a ficar expostas no cliente.")) {
+                            onUpdateSettings?.({ adminPassword: "" });
+                          }
+                        }}
+                        className="text-[8.5px] font-black uppercase text-red-700 border border-red-950/30 bg-red-50 hover:bg-red-100 px-2 py-0.5 cursor-pointer rounded-none"
+                      >
+                        Desativar Senha
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onLock?.()}
+                        className="text-[8.5px] font-black uppercase text-dark-900 border border-dark-900 bg-sand-150 hover:bg-white px-2 py-0.5 cursor-pointer rounded-none"
+                      >
+                        Bloquear Tela
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="bg-red-50 border-2 border-red-900/50 p-2.5 space-y-2 text-[10px]">
+                    <span className="font-bold text-red-900 uppercase tracking-wider block">🔒 Painel Protegido: Insira sua senha para gerenciar esta seção</span>
+                    <div className="flex gap-1.5 max-w-sm">
+                      <input
+                        type="password"
+                        placeholder="Insira sua senha executiva"
+                        value={typedPassword}
+                        onChange={(e) => setTypedPassword(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            onUnlock?.(typedPassword);
+                            setTypedPassword('');
+                          }
+                        }}
+                        className="grow bg-white border-2 border-dark-900 text-[#141414] px-2 py-1 text-[9.5px] font-bold focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onUnlock?.(typedPassword);
+                          setTypedPassword('');
+                        }}
+                        className="bg-red-800 text-white border-2 border-red-900 px-3 py-1 text-[8.5px] font-black uppercase shadow-[1px_1px_0px_0px_rgba(20,20,20,1)] hover:bg-red-900 cursor-pointer rounded-none animate-pulse"
+                      >
+                        Verificar
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="bg-white border-2 border-dark-900 p-3 space-y-2.5">
+                <span className="text-[9.5px] uppercase font-black block text-brand-orange">🛡️ Criar Nova Senha Administrativa</span>
+                <p className="text-[8.5px] text-dark-900/70 leading-normal">
+                  Nenhuma senha foi configurada no momento. Defina uma senha executiva abaixo para bloquear a área de chaves. As chaves serão mascaradas como <code className="bg-sand-200 px-1 font-mono">•••••</code> no navegador por questões de segurança.
+                </p>
+                <div className="flex gap-1.5 max-w-md">
+                  <div className="relative grow">
+                    <input
+                      type={showConfigPwd ? "text" : "password"}
+                      placeholder="Crie uma Senha Administrativa"
+                      value={newAdminPassword}
+                      onChange={(e) => setNewAdminPassword(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && newAdminPassword) {
+                          onUpdateSettings?.({ adminPassword: newAdminPassword });
+                          onUnlock?.(newAdminPassword);
+                          setNewAdminPassword('');
+                        }
+                      }}
+                      className="w-full bg-sand-100 border-2 border-dark-900 text-[#141414] pl-2 pr-12 py-1 text-[9.5px] font-mono font-bold focus:bg-white focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowConfigPwd(!showConfigPwd)}
+                      className="absolute right-1 top-1 bottom-1 px-1.5 py-0 text-[7px] font-black uppercase tracking-wider bg-dark-900 text-sand-100 hover:bg-brand-orange hover:text-dark-950 transition-colors cursor-pointer select-none"
+                    >
+                      {showConfigPwd ? "Ocultar" : "Mostrar"}
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!newAdminPassword) {
+                        alert("Por favor, digite uma senha.");
+                        return;
+                      }
+                      onUpdateSettings?.({ adminPassword: newAdminPassword });
+                      onUnlock?.(newAdminPassword);
+                      setNewAdminPassword('');
+                    }}
+                    className="bg-brand-orange text-dark-900 border-2 border-dark-900 px-3 py-1 text-[8.5px] font-black uppercase shadow-[1px_1px_0px_0px_rgba(20,20,20,1)] hover:bg-white cursor-pointer inline-flex items-center gap-1 shrink-0 rounded-none"
+                  >
+                    <span>Salvar Senha</span>
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

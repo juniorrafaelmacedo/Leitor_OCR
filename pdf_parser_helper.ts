@@ -103,6 +103,47 @@ function isProbablyTariff(valStr: string): boolean {
 }
 
 /**
+ * Aligns labels and values that are stacked vertically across columns.
+ * Finds all matched occurrences of the pattern on the value line, and matches the one closest
+ * horizontally to the position of the keyword on the keyword line.
+ */
+function findClosestValueByCoordinates(keywordLine: string, valueLine: string, keyword: string, pattern: RegExp): string {
+  const kwIndex = keywordLine.toLowerCase().indexOf(keyword.toLowerCase());
+  if (kwIndex === -1) return "";
+
+  const matches: { value: string; index: number }[] = [];
+  // Build a global RegExp from the pattern to fetch all occurrences
+  const flags = pattern.flags.includes('g') ? pattern.flags : pattern.flags + 'g';
+  const regex = new RegExp(pattern.source, flags);
+  
+  let m;
+  // Reset regex index to perform clean execution
+  regex.lastIndex = 0;
+  while ((m = regex.exec(valueLine)) !== null) {
+    matches.push({
+      value: (m[1] || m[0]).trim(),
+      index: m.index
+    });
+  }
+
+  if (matches.length === 0) return "";
+  
+  // Find the match closest to kwIndex
+  let bestMatch = matches[0];
+  let minDiff = Math.abs(bestMatch.index - kwIndex);
+
+  for (let idx = 1; idx < matches.length; idx++) {
+    const diff = Math.abs(matches[idx].index - kwIndex);
+    if (diff < minDiff) {
+      minDiff = diff;
+      bestMatch = matches[idx];
+    }
+  }
+
+  return bestMatch.value;
+}
+
+/**
  * Tries parsing digital text directly with deterministic regex matchers
  */
 export function extractFieldsWithRegex(text: string, fields: ExtractionField[]): Record<string, any> {
@@ -135,7 +176,11 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
       if (
         (
           lineUpper.includes("ENEL") || 
+          lineUpper.includes("ELETROPAULO") || 
           lineUpper.includes("CPFL") || 
+          lineUpper.includes("RGE") || 
+          lineUpper.includes("COPEL") || 
+          lineUpper.includes("CEMIG") || 
           lineUpper.includes("ENERGISA") || 
           lineUpper.includes("LIGHT") ||
           lineUpper.includes("NEOENERGIA") ||
@@ -177,7 +222,12 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
     emissor_nome: /(?:RAZÃO\s*SOCIAL|RAZAO\s*SOCIAL|PRESTADOR|EMISSOR|EMITENTE|NOME\s*DO\s*PRESTADOR|NOME\s*FANTASIA)[:\s]*([^\n\r]+)/i
   };
 
-  const lowerText = text.toLowerCase();
+  const normalize = (s: string): string => {
+    return s ? s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase() : "";
+  };
+
+  const normText = normalize(text);
+  const lowerText = normText;
   const firstCnpjMatch = text.match(/([0-9]{2}\.[0-9]{3}\.[0-9]{3}\/[0-9]{4}-[0-9]{2})/);
   const generalDateMatches = text.match(/([0-3][0-9]\/[0-1][0-9]\/[1-2][0-9]{3})/g);
 
@@ -189,16 +239,17 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
   const monthMapLocal: Record<string, string> = {
     'jan': '01', 'fev': '02', 'mar': '03', 'abr': '04', 'mai': '05', 'jun': '06',
     'jul': '07', 'ago': '08', 'set': '09', 'out': '10', 'nov': '11', 'dez': '12',
-    'janeiro': '01', 'fevereiro': '02', 'março': '03', 'marco': '03', 'abril': '04',
+    'janeiro': '01', 'fevereiro': '02', 'marco': '03', 'abril': '04',
     'maio': '05', 'junho': '06', 'julho': '07', 'agosto': '08', 'setembro': '09',
     'outubro': '10', 'novembro': '11', 'dezembro': '12'
   };
 
   const linesForPreScan = text.split('\n').map(l => l.trim());
   for (const line of linesForPreScan) {
-    // Look for e.g. "NOV/2025" or "11/2025"
-    const monthRegex = new RegExp(`\\b(${Object.keys(monthMapLocal).join('|')}|0[1-9]|1[0-2])[-/](20[2-3][0-9]|[0-9]{2})\\b`, 'i');
-    const monthMatch = line.match(monthRegex);
+    const normLine = normalize(line);
+    // Look for e.g. "NOV / 2025" or "11 / 2025" or "NOV-25" (supporting spaces around separators)
+    const monthRegex = new RegExp(`(?<![0-9/])\\b(${Object.keys(monthMapLocal).join('|')}|0[1-9]|1[0-2])\\s*[-/\\s]\\s*(20[2-3][0-9]|[0-9]{2})\\b(?![0-9/])`, 'i');
+    const monthMatch = normLine.match(monthRegex);
 
     // Look for due date DD/MM/YYYY
     const dateMatch = line.match(/\b([0-3]?[0-9]\/[0-1]?[0-9]\/[1-2][0-9]{3})\b/);
@@ -219,6 +270,9 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
       break;
     }
   }
+
+  // Define normalized lines array for coordinates matching
+  const lines = text.split('\n').map(l => normalize(l));
   
   fields.forEach(field => {
     const fn = field.name.toLowerCase();
@@ -229,51 +283,94 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
     
     // 1. Installation Number / UC
     if (fn.includes('instalacao') || fn.includes('instalação') || fl.includes('instalação') || fl.includes('instalacao') || fl.includes('unidade consumidora') || fl.includes('uc')) {
-      const instKeywords = [
-        'instalação', 'instalacao', 'nº da instalação', 'no. instalação', 'no. instalacao',
-        'unidade consumidora', 'uc', 'cód. instalação', 'código instalação', 'código da instalação',
-        'código do cliente', 'nº do cliente', 'no do cliente'
+      const instTrueKeywords = [
+        'instalacao / unidade consumidora', 'instalacao/unidade consumidora',
+        'sua instalacao', 'no. instalacao', 'no. da instalacao', 'n° instalacao', 'nº instalacao',
+        'cod. instalacao', 'codigo instalacao', 'codigo da instalacao',
+        'codigo unico', 'unidade consumidora', 'instalacao', 'uc'
       ];
-      for (const kw of instKeywords) {
-        const regexVal = new RegExp(`${kw}\\s*[:\\- ]*\\s*([0-9]{5,15})`, 'i');
-        const match = text.match(regexVal);
+      
+      const instFallbackKeywords = [
+        'codigo do cliente', 'no do cliente', 'no. do cliente', 'nº do cliente',
+        'seu numero', 'seu codigo', 'contrato', 'no. do contrato',
+        'nº do contrato', 'numero do contrato', 'codigo de cliente', 'cod. cliente', 'codigo cliente'
+      ];
+      
+      // A. Try exact line-level search first with true installation keywords on normText (no accents, lowercase)
+      for (const kw of instTrueKeywords) {
+        const regexVal = new RegExp(`${kw}\\s*[:\\- ]*\\s*([0-9][0-9\\.\\-/ led]{3,15}[0-9xX]?)`, 'i');
+        const match = normText.match(regexVal);
         if (match) {
-          value = match[1].trim();
-          break;
+          const rawVal = match[1].trim();
+          if ((rawVal.match(/[0-9]/g) || []).length >= 5) {
+            value = rawVal;
+            break;
+          }
         }
       }
 
+      // B. Line-by-line coordinate look-ahead with true installation keywords
       if (!value) {
-        // Line-by-line look-ahead vertical scanning for UC/Customer Number
-        const lines = text.split('\n');
         for (let i = 0; i < lines.length; i++) {
-          const lineLower = lines[i].toLowerCase();
-          const matchesKw = instKeywords.some(kw => {
-            if (kw === 'uc') {
-              return /\buc\b/i.test(lineLower);
-            }
+          const lineLower = lines[i]; // already normalized and lowercase!
+          const matchedKw = instTrueKeywords.find(kw => {
+            if (kw === 'uc') return /\buc\b/i.test(lineLower);
             return lineLower.includes(kw);
           });
-          if (matchesKw) {
-            // Check current line for a 5-15 digit number
-            const matchCurr = lines[i].match(/\b([0-9]{5,15})\b/);
-            if (matchCurr) {
-              value = matchCurr[1].trim();
-              break;
-            }
+          
+          if (matchedKw) {
             // Check next line
             if (i + 1 < lines.length) {
-              const matchNext = lines[i+1].match(/\b([0-9]{5,15})\b/);
-              if (matchNext) {
-                value = matchNext[1].trim();
+              const matchedVal = findClosestValueByCoordinates(lines[i], lines[i+1], matchedKw, /\b([0-9][0-9.-]{3,15}[0-9xX]?)\b/i);
+              if (matchedVal && (matchedVal.match(/[0-9]/g) || []).length >= 5) {
+                value = matchedVal;
                 break;
               }
             }
             // Check 2 lines ahead
             if (i + 2 < lines.length) {
-              const matchNext2 = lines[i+2].match(/\b([0-9]{5,15})\b/);
-              if (matchNext2) {
-                value = matchNext2[1].trim();
+              const matchedVal2 = findClosestValueByCoordinates(lines[i], lines[i+2], matchedKw, /\b([0-9][0-9.-]{3,15}[0-9xX]?)\b/i);
+              if (matchedVal2 && (matchedVal2.match(/[0-9]/g) || []).length >= 5) {
+                value = matchedVal2;
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      // C. Fallback line-level search with client/contract keywords on normText
+      if (!value) {
+        for (const kw of instFallbackKeywords) {
+          const regexVal = new RegExp(`${kw}\\s*[:\\- ]*\\s*([0-9][0-9\\.\\-/]{3,15}[0-9xX]?)`, 'i');
+          const match = normText.match(regexVal);
+          if (match) {
+            const rawVal = match[1].trim();
+            if ((rawVal.match(/[0-9]/g) || []).length >= 5) {
+              value = rawVal;
+              break;
+            }
+          }
+        }
+      }
+
+      // D. Fallback coordinate look-ahead with client/contract keywords
+      if (!value) {
+        for (let i = 0; i < lines.length; i++) {
+          const lineLower = lines[i]; // already normalized & lowercase!
+          const matchedKw = instFallbackKeywords.find(kw => lineLower.includes(kw));
+          if (matchedKw) {
+            if (i + 1 < lines.length) {
+              const matchedVal = findClosestValueByCoordinates(lines[i], lines[i+1], matchedKw, /\b([0-9][0-9.-]{3,15}[0-9xX]?)\b/i);
+              if (matchedVal && (matchedVal.match(/[0-9]/g) || []).length >= 5) {
+                value = matchedVal;
+                break;
+              }
+            }
+            if (i + 2 < lines.length) {
+              const matchedVal2 = findClosestValueByCoordinates(lines[i], lines[i+2], matchedKw, /\b([0-9][0-9.-]{3,15}[0-9xX]?)\b/i);
+              if (matchedVal2 && (matchedVal2.match(/[0-9]/g) || []).length >= 5) {
+                value = matchedVal2;
                 break;
               }
             }
@@ -283,12 +380,11 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
 
       if (!value) {
         // Standalone number rule (looks for a line of exactly 7 to 11 digits near CNPJ or NOTA FISCAL or FATURA or EMISSÃO/EMISSAO)
-        const lines = text.split('\n').map(l => l.trim());
         for (let i = 0; i < lines.length; i++) {
           if (lines[i].match(/^\d{7,11}$/)) {
             const nearbyLines = lines.slice(Math.max(0, i - 4), Math.min(lines.length, i + 5));
-            const nearText = nearbyLines.join('\n').toLowerCase();
-            if (nearText.includes('cnpj') || nearText.includes('nota fiscal') || nearText.includes('fatura') || nearText.includes('emissão') || nearText.includes('emissao')) {
+            const nearText = nearbyLines.join('\n'); // already lowercase & normalized
+            if (nearText.includes('cnpj') || nearText.includes('nota fiscal') || nearText.includes('fatura') || nearText.includes('emissao')) {
               value = lines[i];
               break;
             }
@@ -303,28 +399,29 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
       }
 
       if (!value) {
-        const refKeywords = [
-          'mês de referência', 'mês referência', 'mes referencia', 'mês ref', 'mes ref',
-          'mês/ano', 'referência', 'referencia', 'ref', 'competência', 'competencia', 'mês de ref',
-          'referente a', 'conta referente a'
+        const refKeywordsAll = [
+          'mes de referencia', 'mes referencia', 'mes ref',
+          'mes/ano', 'referencia', 'ref', 'competencia', 'mes de ref',
+          'referente a', 'conta referente a', 'essa conta e de'
         ];
-        for (const kw of refKeywords) {
-          const regexVal = new RegExp(`${kw}\\s*[:\\- ]*\\s*\\b([0-1][0-9]\\/[2-9][0-9]{3})\\b`, 'i');
-          const match = text.match(regexVal);
+        
+        for (const kw of refKeywordsAll) {
+          const regexVal = new RegExp(`${kw}\\s*[:\\- ]*\\s*(?<![0-9/])([0-1][0-9])\\s*\\/\\s*(20[2-3][0-9])(?![0-9/])`, 'i');
+          const match = normText.match(regexVal);
           if (match) {
-            value = match[1].trim();
+            value = `${match[1].trim()}/${match[2].trim()}`;
             break;
           }
           
-          const regexValShort = new RegExp(`${kw}\\s*[:\\- ]*\\s*\\b([0-1][0-9]\\/[0-9]{2})\\b`, 'i');
-          const matchShort = text.match(regexValShort);
+          const regexValShort = new RegExp(`${kw}\\s*[:\\- ]*\\s*(?<![0-9/])([0-1][0-9])\\s*\\/\\s*([0-9]{2})(?![0-9/])`, 'i');
+          const matchShort = normText.match(regexValShort);
           if (matchShort) {
-            value = matchShort[1].trim();
+            value = `${matchShort[1].trim()}/20${matchShort[2].trim()}`;
             break;
           }
 
-          const regexMonth = new RegExp(`${kw}\\s*[:\\- ]*\\s*\\b(${Object.keys(monthMapLocal).join('|')})\\s*[-/]?\\s*([0-9]{2,4})\\b`, 'i');
-          const matchMonth = text.match(regexMonth);
+          const regexMonth = new RegExp(`${kw}\\s*[:\\- ]*\\s*(?<![0-9/])\\b(${Object.keys(monthMapLocal).join('|')})\\s*[-/\\s]?\\s*(20[2-3][0-9]|[0-9]{2})\\b(?![0-9/])`, 'i');
+          const matchMonth = normText.match(regexMonth);
           if (matchMonth) {
             const mName = matchMonth[1].toLowerCase();
             const mNum = monthMapLocal[mName];
@@ -337,9 +434,87 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
       }
 
       if (!value) {
-        // Try direct searching for month abbreviation + year
-        const rx = new RegExp(`\\b(${Object.keys(monthMapLocal).join('|')})[-/](20[2-3][0-9]\\b|[0-9]{2}\\b)`, 'i');
-        const match = text.match(rx);
+        // Vertical lookahead scanning with coordinate alignment!
+        const refKeywordsAll = [
+          'mes/ano', 'referente a', 'mes ref', 'mes de referencia',
+          'mes referencia', 'referencia', 'ref', 'conta referente a',
+          'essa conta e de'
+        ];
+        
+        for (let i = 0; i < lines.length; i++) {
+          const lineLower = lines[i]; // already normalized and lowercase!
+          const matchedKw = refKeywordsAll.find(kw => lineLower.includes(kw));
+          if (matchedKw) {
+            // Pattern for MM/YYYY or MM/YY
+            const patternMMYY = /(?<![0-9/])(0?[1-9]|1[0-2])\s*\/\s*(20[2-3][0-9]|[2-3][0-9])(?![0-9/])/i;
+            // Pattern for Word Month + Year
+            const patternWordY = new RegExp(`(?<![0-9/])\\b((${Object.keys(monthMapLocal).join('|')})\\s*[-/\\s]?\\s*(20[2-3][0-9]|[0-9]{2}))\\b(?![0-9/])`, 'i');
+            
+            // Check next line MM/YYYY or Month Word
+            if (i + 1 < lines.length) {
+              let matchedVal = findClosestValueByCoordinates(lines[i], lines[i+1], matchedKw, patternMMYY);
+              if (!matchedVal) {
+                matchedVal = findClosestValueByCoordinates(lines[i], lines[i+1], matchedKw, patternWordY);
+              }
+              if (matchedVal) {
+                const cleanVal = matchedVal.replace(/\s+/g, '');
+                if (cleanVal.includes('/')) {
+                  const parts = cleanVal.split('/');
+                  let m = parts[0].padStart(2, '0');
+                  let y = parts[1];
+                  if (y.length === 2) y = '20' + y;
+                  value = `${m}/${y}`;
+                  break;
+                } else {
+                  const mMatch = matchedVal.match(new RegExp(`(${Object.keys(monthMapLocal).join('|')})`, 'i'));
+                  const yMatch = matchedVal.match(/(20[2-3][0-9]|[0-9]{2})/);
+                  if (mMatch && yMatch) {
+                    const mNum = monthMapLocal[mMatch[1].toLowerCase()];
+                    let y = yMatch[1];
+                    if (y.length === 2) y = '20' + y;
+                    value = `${mNum}/${y}`;
+                    break;
+                  }
+                }
+              }
+            }
+            
+            // Check current line as fallback
+            if (!value) {
+              let matchedVal = findClosestValueByCoordinates(lines[i], lines[i], matchedKw, patternMMYY);
+              if (!matchedVal) {
+                matchedVal = findClosestValueByCoordinates(lines[i], lines[i], matchedKw, patternWordY);
+              }
+              if (matchedVal) {
+                const cleanVal = matchedVal.replace(/\s+/g, '');
+                if (cleanVal.includes('/')) {
+                  const parts = cleanVal.split('/');
+                  let m = parts[0].padStart(2, '0');
+                  let y = parts[1];
+                  if (y.length === 2) y = '20' + y;
+                  value = `${m}/${y}`;
+                  break;
+                } else {
+                  const mMatch = matchedVal.match(new RegExp(`(${Object.keys(monthMapLocal).join('|')})`, 'i'));
+                  const yMatch = matchedVal.match(/(20[2-3][0-9]|[0-9]{2})/);
+                  if (mMatch && yMatch) {
+                    const mNum = monthMapLocal[mMatch[1].toLowerCase()];
+                    let y = yMatch[1];
+                    if (y.length === 2) y = '20' + y;
+                    value = `${mNum}/${y}`;
+                    break;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      if (!value) {
+        // Try direct searching for month abbreviation + year (allowing spaces around slash or separator)
+        const rx = new RegExp(`\\b(${Object.keys(monthMapLocal).join('|')})\\s*[-/\\s]\\s*(20[2-3][0-9]\\b|[0-9]{2}\\b)`, 'i');
+        const match = normText.match(rx);
         if (match) {
           const mName = match[1].toLowerCase();
           const mNum = monthMapLocal[mName];
@@ -352,49 +527,7 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
       }
 
       if (!value) {
-        // Line-by-line look-ahead for reference month
-        const lines = text.split('\n');
-        const refKeywords = ['mês/ano', 'mes/ano', 'referente a', 'mês ref', 'mes ref', 'mês de referência', 'mês referência', 'mes referencia', 'referência', 'referencia', 'ref', 'conta referente a'];
-        for (let i = 0; i < lines.length; i++) {
-          const lineLower = lines[i].toLowerCase();
-          if (refKeywords.some(kw => lineLower.includes(kw))) {
-            // Check current line
-            const matchCurr = lines[i].match(/\b(0[1-9]|1[0-2])\/(20[2-3][0-9]|[2-3][0-9])\b/);
-            if (matchCurr) {
-              let m = matchCurr[1];
-              let y = matchCurr[2];
-              if (y.length === 2) y = '20' + y;
-              value = `${m}/${y}`;
-              break;
-            }
-            // Check next line
-            if (i + 1 < lines.length) {
-              const matchNext = lines[i+1].match(/\b(0[1-9]|1[0-2])\/(20[2-3][0-9]|[2-3][0-9])\b/);
-              if (matchNext) {
-                let m = matchNext[1];
-                let y = matchNext[2];
-                if (y.length === 2) y = '20' + y;
-                value = `${m}/${y}`;
-                break;
-              }
-            }
-            // Check 2 lines ahead
-            if (i + 2 < lines.length) {
-              const matchNext2 = lines[i+2].match(/\b(0[1-9]|1[0-2])\/(20[2-3][0-9]|[2-3][0-9])\b/);
-              if (matchNext2) {
-                let m = matchNext2[1];
-                let y = matchNext2[2];
-                if (y.length === 2) y = '20' + y;
-                value = `${m}/${y}`;
-                break;
-              }
-            }
-          }
-        }
-      }
-
-      if (!value) {
-        const matches = [...text.matchAll(/(?<![0-9/])(0[1-9]|1[0-2])\/(20[2-3][0-9])(?![0-9/])/g)];
+        const matches = [...normText.matchAll(/(?<![0-9/])(0[1-9]|1[0-2])\s*\/\s*(20[2-3][0-9])(?![0-9/])/g)];
         if (matches && matches[0]) {
           value = matches[0][1] + "/" + matches[0][2];
         }
@@ -407,43 +540,105 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
       }
 
       if (!value) {
+        // Coordinated alignment scanner (primary and extremely robust for multi-column and stacked table layouts)
         const vencimentoKeywords = [
-          'vencimento', 'data de vencimento', 'pague até', 'pagar até', 
-          'pagar ate', 'vcto', 'vence em', 'vence', 'venc', 'venc:'
+          'vencimento', 'data de vencimento', 'pague ate', 'pagar ate', 
+          'vcto', 'vence em', 'vence', 'venc', 'venc:', 'data limite', 'vencimento em', 'vencto', 'vto'
+        ];
+        
+        for (let i = 0; i < lines.length; i++) {
+          const lineLower = lines[i]; // already normalized and lowercase!
+          const matchedKw = vencimentoKeywords.find(kw => lineLower.includes(kw));
+          if (matchedKw) {
+            const datePattern = /\b([0-3]?[0-9]\/[0-1]?[0-9]\/[1-2][0-9]{3})\b/i;
+            
+            // Check next line first (most common for column and stacked layouts)
+            if (i + 1 < lines.length) {
+              const matchedVal = findClosestValueByCoordinates(lines[i], lines[i+1], matchedKw, datePattern);
+              if (matchedVal) {
+                value = standardizeDate(matchedVal);
+                break;
+              }
+            }
+            
+            // Check current line
+            const matchedValCurr = findClosestValueByCoordinates(lines[i], lines[i], matchedKw, datePattern);
+            if (matchedValCurr) {
+              value = standardizeDate(matchedValCurr);
+              break;
+            }
+            
+            // Check 2 lines ahead
+            if (i + 2 < lines.length) {
+              const matchedVal2 = findClosestValueByCoordinates(lines[i], lines[i+2], matchedKw, datePattern);
+              if (matchedVal2) {
+                value = standardizeDate(matchedVal2);
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      if (!value) {
+        // Line-by-line exact regex matches search
+        const vencimentoKeywords = [
+          'vencimento', 'data de vencimento', 'pague ate', 'pagar ate', 
+          'vcto', 'vence em', 'vence', 'venc', 'venc:', 'vencto', 'vto'
         ];
         for (const kw of vencimentoKeywords) {
           const regexVal = new RegExp(`${kw}\\s*[:\\- ]*\\s*([0-3][0-9]\/[0-1][0-9]\/[1-2][0-9]{3})`, 'i');
-          const match = text.match(regexVal);
+          const match = normText.match(regexVal);
           if (match) {
             value = standardizeDate(match[1].trim());
             break;
           }
         }
       }
-      
+
       if (!value) {
-        // Line-by-line look-ahead vertical scanning for Vencimento
-        const lines = text.split('\n');
-        const vencimentoKeywords = ['vencimento', 'data de vencimento', 'pague até', 'pagar até', 'pagar ate', 'vcto', 'vence em', 'vence', 'venc', 'venc:'];
+        // Broad context look-ahead chronos scanner with reading/emission lines ignored (Safety Fallback)
+        const vencimentoKeywords = [
+          'vencimento', 'data de vencimento', 'pague ate', 'pagar ate', 
+          'vcto', 'vence em', 'vence', 'venc', 'venc:', 'data limite', 'vencimento em', 'vencto', 'vto'
+        ];
+        
         for (let i = 0; i < lines.length; i++) {
-          const lineLower = lines[i].toLowerCase();
+          const lineLower = lines[i]; // already normalized and lowercase!
           if (vencimentoKeywords.some(kw => lineLower.includes(kw))) {
-            const dateMatchCurr = lines[i].match(/([0-3]?[0-9]\/[0-1]?[0-9]\/[1-2][0-9]{3})/);
-            if (dateMatchCurr) {
-              value = standardizeDate(dateMatchCurr[1].trim());
-              break;
-            }
-            if (i + 1 < lines.length) {
-              const dateMatchNext = lines[i+1].match(/([0-3]?[0-9]\/[0-1]?[0-9]\/[1-2][0-9]{3})/);
-              if (dateMatchNext) {
-                value = standardizeDate(dateMatchNext[1].trim());
-                break;
+            const contextLines: string[] = [];
+            
+            // Filter out context lines containing keywords for other dates (like next readings or presentation dates)
+            const forbiddenWords = ['leitura', 'proxima', 'anterior', 'realizada', 'prevista'];
+            
+            for (const offset of [-1, 0, 1, 2]) {
+              const idx = i + offset;
+              if (idx >= 0 && idx < lines.length) {
+                const subLineLower = lines[idx]; // already normalized & lowercase!
+                if (!forbiddenWords.some(fw => subLineLower.includes(fw))) {
+                  contextLines.push(lines[idx]);
+                }
               }
             }
-            if (i + 2 < lines.length) {
-              const dateMatchNext2 = lines[i+2].match(/([0-3]?[0-9]\/[0-1]?[0-9]\/[1-2][0-9]{3})/);
-              if (dateMatchNext2) {
-                value = standardizeDate(dateMatchNext2[1].trim());
+            
+            const contextText = contextLines.join(' ');
+            const foundDates = [...contextText.matchAll(/\b([0-3]?[0-9])\/([0-1]?[0-9])\/([1-2][0-9]{3})\b/g)];
+            if (foundDates.length > 0) {
+              const parsedDates = foundDates.map(fd => {
+                const day = parseInt(fd[1], 10);
+                const month = parseInt(fd[2], 10);
+                const year = parseInt(fd[3], 10);
+                return {
+                  raw: `${fd[1].padStart(2, '0')}/${fd[2].padStart(2, '0')}/${fd[3]}`,
+                  time: new Date(year, month - 1, day).getTime()
+                };
+              });
+              
+              // Sort by date descending (latest date is most probably the Vencimento)
+              parsedDates.sort((a, b) => b.time - a.time);
+              if (parsedDates.length > 0) {
+                value = parsedDates[0].raw;
+                console.log(`[Smart DueDate Scanner] Encontrou múltiplas datas no contexto de vencimento. Selecionando a mais recente com salvaguarda: ${value}`);
                 break;
               }
             }
@@ -486,7 +681,7 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
         ];
 
         for (const rx of itemRowPatterns) {
-          const match = text.match(rx);
+          const match = normText.match(rx);
           if (match) {
             const raw = match[1].trim();
             // clean spaces for thousands separators like "5 222"
@@ -506,7 +701,6 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
       }
 
       // 0.1 EXPLICIT NOMENCLATURES PRIORITY SCANNER
-      // Prioritizing user requested nomenclatures: "Quant. faturada", "Quant.(kwh)", "consumo KWh", "Consumo em kWh"
       if (!value) {
         // Direct regex patterns with captures
         const directRegexes = [
@@ -517,7 +711,7 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
           /consumo\s+kwh\s*[:\- R$]*\s*\b([0-9\s\.,]+)\b/i,
         ];
         for (const regex of directRegexes) {
-          const match = text.match(regex);
+          const match = normText.match(regex);
           if (match) {
             const raw = match[1].trim();
             const cleanedVal = raw.replace(/(\d)\s+(\d)/g, '$1$2').replace(/\s/g, '');
@@ -536,7 +730,6 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
       }
 
       if (!value) {
-        const lines = text.split('\n');
         const specKeywords = [
           { pattern: /quant\.?\s*faturada/i, name: 'Quant. faturada' },
           { pattern: /quant\.?\s*\(\s*kwh\s*\)/i, name: 'Quant.(kwh)' },
@@ -549,17 +742,14 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
 
         for (const kw of specKeywords) {
           for (let i = 0; i < lines.length; i++) {
-            const line = lines[i].trim();
+            const line = lines[i].trim(); // already normalized and lowercase
             if (kw.pattern.test(line)) {
               console.log(`[Spec Nomenclatures] Encontrado cabeçalho de consumo correspondente a "${kw.name}" na linha: "${line}"`);
               
-              // Tenta extrair o primeiro número válido dessa linha depois do padrão
-              const lineLower = line.toLowerCase();
-              const matchIndex = lineLower.search(kw.pattern);
+              const matchIndex = line.search(kw.pattern);
               if (matchIndex !== -1) {
                 const subStr = line.substring(matchIndex);
-                // Busca um número com decimal opcional/milhar
-                const numbers = [...subStr.matchAll(/\b([0-9]{1,3}(?:\s*[0-9]{3})*(?:,[0-9]+)?|[0-9]+,[0-9]+|[0-9]+)\b/g)];
+                const numbers = [...subStr.matchAll(/\b([0-9\.,]+)\b/g)];
                 for (const num of numbers) {
                   const rawNum = num[1].replace(/(\d)\s+(\d)/g, '$1$2').replace(/\s/g, '');
                   const cleanVal = parseFloat(rawNum.replace(/\./g, '').replace(',', '.'));
@@ -577,42 +767,80 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
               
               if (value) break;
 
-              // Se não encontrou número na mesma linha, vasculha a linha seguinte (comum em listagens horizontais)
+              // Se não encontrou número na mesma linha, vasculha a linha seguinte (comum em listagens horizontais) por proximidade de coordenadas
               if (i + 1 < lines.length) {
-                const nextLine = lines[i+1].trim();
-                const numbersNext = [...nextLine.matchAll(/\b([0-9]{1,3}(?:\s*[0-9]{3})*(?:,[0-9]+)?|[0-9]+,[0-9]+|[0-9]+)\b/g)];
-                for (const num of numbersNext) {
-                  const rawNum = num[1].replace(/(\d)\s+(\d)/g, '$1$2').replace(/\s/g, '');
+                const matchObj = line.match(kw.pattern);
+                const kwText = matchObj ? matchObj[0] : kw.name;
+                const matchedVal = findClosestValueByCoordinates(lines[i], lines[i+1], kwText, /\b([0-9\.,]+)\b/gi);
+                if (matchedVal) {
+                  const rawNum = matchedVal.replace(/(\d)\s+(\d)/g, '$1$2').replace(/\s/g, '');
                   const cleanVal = parseFloat(rawNum.replace(/\./g, '').replace(',', '.'));
                   if (!isNaN(cleanVal) && cleanVal > 0 && cleanVal < 150000 && cleanVal !== 2025 && cleanVal !== 2026 && cleanVal !== 2024 && cleanVal !== 2023) {
                     if (isProbablyTariff(rawNum)) {
                       console.log(`[Spec Nomenclatures Next Line] Ignored tariff value: "${rawNum}"`);
-                      continue;
+                    } else {
+                      value = rawNum;
+                      console.log(`[Spec Nomenclatures] Número extraído da linha seguinte por coordenadas: "${value}" (valor: ${cleanVal})`);
                     }
-                    value = rawNum;
-                    console.log(`[Spec Nomenclatures] Número extraído da linha seguinte: "${value}" (valor: ${cleanVal})`);
-                    break;
+                  }
+                }
+                
+                // Fallback se o alinhamento de coordenadas não retornar um valor mas existirem números
+                if (!value) {
+                  const nextLine = lines[i+1].trim();
+                  const numbersNext = [...nextLine.matchAll(/\b([0-9\.,]+)\b/g)];
+                  for (const num of numbersNext) {
+                    const rawNum = num[1].replace(/(\d)\s+(\d)/g, '$1$2').replace(/\s/g, '');
+                    const cleanVal = parseFloat(rawNum.replace(/\./g, '').replace(',', '.'));
+                    if (!isNaN(cleanVal) && cleanVal > 0 && cleanVal < 150000 && cleanVal !== 2025 && cleanVal !== 2026 && cleanVal !== 2024 && cleanVal !== 2023) {
+                      if (isProbablyTariff(rawNum)) {
+                        console.log(`[Spec Nomenclatures Next Line Fallback] Ignored tariff value: "${rawNum}"`);
+                        continue;
+                      }
+                      value = rawNum;
+                      console.log(`[Spec Nomenclatures Fallback] Número extraído da linha seguinte: "${value}" (valor: ${cleanVal})`);
+                      break;
+                    }
                   }
                 }
               }
 
               if (value) break;
 
-              // Se ainda não, vasculha 2 linhas seguintes
+              // Se ainda não, vasculha 2 linhas seguintes por proximidade de coordenadas
               if (i + 2 < lines.length) {
-                const nextLine2 = lines[i+2].trim();
-                const numbersNext2 = [...nextLine2.matchAll(/\b([0-9]{1,3}(?:\s*[0-9]{3})*(?:,[0-9]+)?|[0-9]+,[0-9]+|[0-9]+)\b/g)];
-                for (const num of numbersNext2) {
-                  const rawNum = num[1].replace(/(\d)\s+(\d)/g, '$1$2').replace(/\s/g, '');
-                  const cleanVal = parseFloat(rawNum.replace(/\./g, '').replace(',', '.'));
-                  if (!isNaN(cleanVal) && cleanVal > 0 && cleanVal < 150000 && cleanVal !== 2025 && cleanVal !== 2026 && cleanVal !== 2024 && cleanVal !== 2023) {
-                    if (isProbablyTariff(rawNum)) {
-                      console.log(`[Spec Nomenclatures Two Lines Below] Ignored tariff value: "${rawNum}"`);
-                      continue;
+                const matchObj = line.match(kw.pattern);
+                const kwText = matchObj ? matchObj[0] : kw.name;
+                const matchedVal2 = findClosestValueByCoordinates(lines[i], lines[i+2], kwText, /\b([0-9\.,]+)\b/gi);
+                if (matchedVal2) {
+                  const rawNum2 = matchedVal2.replace(/(\d)\s+(\d)/g, '$1$2').replace(/\s/g, '');
+                  const cleanVal2 = parseFloat(rawNum2.replace(/\./g, '').replace(',', '.'));
+                  if (!isNaN(cleanVal2) && cleanVal2 > 0 && cleanVal2 < 150000 && cleanVal2 !== 2025 && cleanVal2 !== 2026 && cleanVal2 !== 2024 && cleanVal2 !== 2023) {
+                    if (isProbablyTariff(rawNum2)) {
+                      console.log(`[Spec Nomenclatures Two Lines Below] Ignored tariff value: "${rawNum2}"`);
+                    } else {
+                      value = rawNum2;
+                      console.log(`[Spec Nomenclatures] Número extraído de duas linhas abaixo por coordenadas: "${value}" (valor: ${cleanVal2})`);
                     }
-                    value = rawNum;
-                    console.log(`[Spec Nomenclatures] Número extraído de duas linhas abaixo: "${value}" (valor: ${cleanVal})`);
-                    break;
+                  }
+                }
+
+                // Fallback se o alinhamento de coordenadas não retornar um valor mas existirem números
+                if (!value) {
+                  const nextLine2 = lines[i+2].trim();
+                  const numbersNext2 = [...nextLine2.matchAll(/\b([0-9\.,]+)\b/g)];
+                  for (const num of numbersNext2) {
+                    const rawNum = num[1].replace(/(\d)\s+(\d)/g, '$1$2').replace(/\s/g, '');
+                    const cleanVal = parseFloat(rawNum.replace(/\./g, '').replace(',', '.'));
+                    if (!isNaN(cleanVal) && cleanVal > 0 && cleanVal < 150000 && cleanVal !== 2025 && cleanVal !== 2026 && cleanVal !== 2024 && cleanVal !== 2023) {
+                      if (isProbablyTariff(rawNum)) {
+                        console.log(`[Spec Nomenclatures Two Lines Below Fallback] Ignored tariff value: "${rawNum}"`);
+                        continue;
+                      }
+                      value = rawNum;
+                      console.log(`[Spec Nomenclatures Fallback] Número extraído de duas linhas abaixo: "${value}" (valor: ${cleanVal})`);
+                      break;
+                    }
                   }
                 }
               }
@@ -627,9 +855,6 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
       // 1. UNIVERSAL MATHEMATICAL SEQUENCE SCANNER (Anterior, Atual, Constante, Consumo)
       // This is 100% accurate because it uses the mathematical rule: Consumo = (Atual - Anterior) * Constante
       if (!value) {
-        const lines = text.split('\n');
-        
-        // Helper to get possible numeric values from a Portuguese/Standard formatted number string
         const getPossibleValues = (s: string): number[] => {
           const clean = s.replace(/[^0-9.,]/g, '');
           if (!clean) return [];
@@ -659,29 +884,25 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
           
           // Skip history lines, address lines, corporate lines to prevent false matches
           const isIgnoredLine = 
-            line.toUpperCase().includes('HISTÓRICO') || 
-            line.toUpperCase().includes('HISTORICO') ||
-            line.toUpperCase().includes('CNPJ') ||
-            line.toUpperCase().includes('TELEFONE') ||
-            line.toUpperCase().includes('AVENIDA') ||
-            line.toUpperCase().includes('RUA ') ||
-            line.toUpperCase().includes('CEP ') ||
-            line.toUpperCase().includes('CHAVE') ||
-            line.toUpperCase().includes('ACESSO') ||
-            line.toUpperCase().includes('PROTOCOLO') ||
-            line.toUpperCase().includes('AUTORIZAÇÃO') ||
-            line.toUpperCase().includes('AUTORIZACAO') ||
-            line.toUpperCase().includes('CPF') ||
-            line.toUpperCase().includes('SÉRIE') ||
-            line.toUpperCase().includes('SERIE') ||
-            line.toUpperCase().includes('FISCAL') ||
-            line.toUpperCase().includes('NF3E') ||
-            line.toUpperCase().includes('NF-E') ||
-            line.toUpperCase().includes('NFE') ||
-            line.toUpperCase().includes('IE:') ||
-            line.toUpperCase().includes('INSCRICAO') ||
-            line.toUpperCase().includes('INSCRIÇÃO') ||
-            line.toUpperCase().includes('DATA ') ||
+            line.includes('historico') || 
+            line.includes('cnpj') ||
+            line.includes('telefone') ||
+            line.includes('avenida') ||
+            line.includes('rua') ||
+            line.includes('cep') ||
+            line.includes('chave') ||
+            line.includes('acesso') ||
+            line.includes('protocolo') ||
+            line.includes('autorizacao') ||
+            line.includes('cpf') ||
+            line.includes('serie') ||
+            line.includes('fiscal') ||
+            line.includes('nf3e') ||
+            line.includes('nf-e') ||
+            line.includes('nfe') ||
+            line.includes('ie:') ||
+            line.includes('inscricao') ||
+            line.includes('data') ||
             // If the line has 4 or more numeric chunk groups of 4 digits (typical of NF3-e Access Key spaced-out chunks)
             (line.match(/\b\d{4}\b/g) || []).length >= 4 ||
             // If the line contains a single very long sequence of digits (e.g. 20 or more digits like a barcode or raw key)
@@ -709,6 +930,12 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
               for (let idxConst = idxAtu + 1; idxConst < candidates.length - 1; idxConst++) {
                 for (let idxCons = idxConst + 1; idxCons < candidates.length; idxCons++) {
                   
+                  if (isProbablyTariff(candidates[idxAnt].original) ||
+                      isProbablyTariff(candidates[idxAtu].original) ||
+                      isProbablyTariff(candidates[idxCons].original)) {
+                    continue;
+                  }
+
                   const ants = candidates[idxAnt].values;
                   const atus = candidates[idxAtu].values;
                   const consts = candidates[idxConst].values;
@@ -718,13 +945,16 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
                     for (const valAtu of atus) {
                       for (const valConst of consts) {
                         for (const valCons of conss) {
+                          if (valCons < 5.0) continue; // Minimum active monthly consumption is at least 5.0 kWh!
+
                           const diff = valAtu - valAnt;
                           if (diff <= 0) continue;
                           
                           const expectedConsumo = diff * valConst;
                           const ratio = Math.abs(expectedConsumo - valCons) / valCons;
                           
-                          if (ratio < 0.01 || Math.abs(expectedConsumo - valCons) <= 1.0) {
+                          // Allow a loose check (difference of <= 1.0) only if valCons is large enough (>= 30). Otherwise, require a very tight ratio.
+                          if (ratio < 0.01 || (valCons >= 30.0 && Math.abs(expectedConsumo - valCons) <= 1.0)) {
                             value = candidates[idxCons].original;
                             console.log(`[Universal Math Scanner] MATCH 4 COLS ("${line}"): Anterior=${valAnt} ("${candidates[idxAnt].original}"), Atual=${valAtu} ("${candidates[idxAtu].original}"), Constante=${valConst} ("${candidates[idxConst].original}"), Consumo=${valCons} -> SELECIONADO="${value}"`);
                             foundMathMatch = true;
@@ -754,6 +984,12 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
             for (let idxAtu = idxAnt + 1; idxAtu < candidates.length - 1; idxAtu++) {
               for (let idxCons = idxAtu + 1; idxCons < candidates.length; idxCons++) {
                 
+                if (isProbablyTariff(candidates[idxAnt].original) ||
+                    isProbablyTariff(candidates[idxAtu].original) ||
+                    isProbablyTariff(candidates[idxCons].original)) {
+                  continue;
+                }
+
                 const ants = candidates[idxAnt].values;
                 const atus = candidates[idxAtu].values;
                 const conss = candidates[idxCons].values;
@@ -761,11 +997,14 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
                 for (const valAnt of ants) {
                   for (const valAtu of atus) {
                     for (const valCons of conss) {
+                      if (valCons < 5.0) continue; // Minimum active monthly consumption is at least 5.0 kWh!
+
                       const diff = valAtu - valAnt;
                       if (diff <= 0) continue;
                       
                       const ratio = Math.abs(diff - valCons) / valCons;
-                      if (ratio < 0.01 || Math.abs(diff - valCons) <= 1.0) {
+                      // Allow a loose check (difference of <= 1.0) only if valCons is large enough (>= 30). Otherwise, require a very tight ratio.
+                      if (ratio < 0.01 || (valCons >= 30.0 && Math.abs(diff - valCons) <= 1.0)) {
                         value = candidates[idxCons].original;
                         console.log(`[Universal Math Scanner] MATCH 3 COLS ("${line}"): Anterior=${valAnt} ("${candidates[idxAnt].original}"), Atual=${valAtu} ("${candidates[idxAtu].original}"), Consumo=${valCons} -> SELECIONADO="${value}"`);
                         foundMathMatch = true;
@@ -788,20 +1027,21 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
       }
 
       // 2. ENERGISA SPECIFIC SEQUENCE ("Total anterior atual constante consumo")
-      // Example: "Total 16146 16607 1 461" or "Total 15841 16146 1 305"
       if (!value) {
-        const energisaTotalMatch = text.match(/\bTotal\s+([0-9\.,]{3,8})\s+([0-9\.,]{3,8})\s+([0-9\.,]+)\s+([0-9\.,]{2,6})\b/i);
+        const energisaTotalMatch = normText.match(/\bTotal\s+([0-9\.,]{3,8})\s+([0-9\.,]{3,8})\s+([0-9\.,]+)\s+([0-9\.,]{2,6})\b/i);
         if (energisaTotalMatch) {
-          value = energisaTotalMatch[4].trim();
-          console.log(`[Energisa Total Match] Encontrado consumo por sequência total: "${energisaTotalMatch[0]}" -> ${value}`);
+          const candidate = energisaTotalMatch[3].trim();
+          if (!isProbablyTariff(candidate)) {
+            value = candidate;
+            console.log(`[Energisa Total Match] Encontrado consumo por sequência total: "${energisaTotalMatch[0]}" -> ${value}`);
+          }
         }
       }
 
       // 3. ENERGISA "Consumo em kWh" SPECIFIC CHARGE LINE
-      // Matches "Consumo em kWh KWH 461" or "Consumo em kWh 305"
       if (!value) {
-        const energisaConsumoPattern = text.match(/Consumo\s+em\s+kWh\s*(?:[A-Z]{3})?\s*([0-9\.,]+)/i) ||
-                                       text.match(/Consumo\s+em\s+kWh\s+([0-9\.,]+)/i);
+        const energisaConsumoPattern = normText.match(/Consumo\s+em\s+kWh\s*(?:[A-Z]{3})?\s*([0-9\.,]+)/i) ||
+                                       normText.match(/Consumo\s+em\s+kWh\s+([0-9\.,]+)/i);
         if (energisaConsumoPattern) {
           value = energisaConsumoPattern[1].trim();
         }
@@ -809,20 +1049,20 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
 
       // 4. CPFL SPECIFIC LINE FALLBACKS
       if (!value) {
-        const cpflMeter = text.match(/Energia\s+Ativa(?:-kWh)?\s+(?:único|unico)[\s\S]*?([0-9\.,]+)\s*$/i) ||
-                          text.match(/Energia\s+Ativa(?:-kWh)?\s+(?:único|unico)[\s\S]*?([0-9\.,]+)/i);
+        const cpflMeter = normText.match(/energia\s+ativa(?:-kwh)?\s+(?:unico|unico)[\s\S]*?([0-9\.,]+)\s*$/i) ||
+                          normText.match(/energia\s+ativa(?:-kwh)?\s+(?:unico|unico)[\s\S]*?([0-9\.,]+)/i);
         if (cpflMeter) {
           value = cpflMeter[1].trim();
         }
       }
       if (!value) {
-        const cpflTusd = text.match(/Consumo\s+Uso\s+Sistema[\s\S]*?TUSD[\s\S]*?kWh\s+([0-9\.,]+)/i);
+        const cpflTusd = normText.match(/consumo\s+uso\s+sistema[\s\S]*?tusd[\s\S]*?kwh\s+([0-9\.,]+)/i);
         if (cpflTusd) {
           value = cpflTusd[1].trim();
         }
       }
       if (!value) {
-        const cpflTe = text.match(/Consumo\s*-\s*TE[\s\S]*?kWh\s+([0-9\.,]+)/i);
+        const cpflTe = normText.match(/consumo\s*-\s*te[\s\S]*?kwh\s+([0-9\.,]+)/i);
         if (cpflTe) {
           value = cpflTe[1].trim();
         }
@@ -830,7 +1070,7 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
 
       // 5. ENEL SPECIFIC TABLE FALLBACKS
       if (!value) {
-        const enelSequence = text.match(/(?:ENRG\s+ATV|ENERGIA\s+ATIVA|ENRG|ENERG)[\s\S]*?([0-9\.,]+)\s+([0-9\.,]+)\s+([0-9\.,]+)\s+([0-9\.,]+)/i);
+        const enelSequence = normText.match(/(?:enrg\s+atv|energia\s+ativa|enrg|energ)[\s\S]*?([0-9\.,]+)\s+([0-9\.,]+)\s+([0-9\.,]+)\s+([0-9\.,]+)/i);
         if (enelSequence) {
           const candidate = enelSequence[4].trim();
           if (!isProbablyTariff(candidate)) {
@@ -839,8 +1079,8 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
         }
       }
       if (!value) {
-        const enelMeter = text.match(/ENRG\s+ATV[A-Z\s]*[\s\S]*?([0-9\.,]+)/i) ||
-                          text.match(/ENERGIA\s+ATIVA[A-Za-z\s]*[\s\S]*?([0-9\.,]+)/i);
+        const enelMeter = normText.match(/enrg\s+atv[a-z\s]*[\s\S]*?([0-9\.,]+)/i) ||
+                          normText.match(/energia\s+ativa[a-z\s]*[\s\S]*?([0-9\.,]+)/i);
         if (enelMeter) {
           const candidate = enelMeter[1].trim();
           if (!isProbablyTariff(candidate)) {
@@ -851,7 +1091,7 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
 
       // 6. HISTORIC CONSUMO TABLE FALLBACKS (ENEL e.g. "DEZ/25 4.160,000")
       if (!value) {
-        const historyMatches = [...text.matchAll(/\b(?:JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)\s*[\/\-]\s*[0-9]{2}\s+([0-9\.,]+)\b/gi)];
+        const historyMatches = [...normText.matchAll(/\b(?:jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)\s*[\/\-]\s*[0-9]{2}\s+([0-9\.,]+)\b/gi)];
         if (historyMatches.length > 0) {
           let foundRefMatch = false;
           if (preScannedRef) {
@@ -866,7 +1106,7 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
                const mName = monthMapNum[mNum];
                if (mName) {
                  for (const m of historyMatches) {
-                   const matchText = m[0].toLowerCase();
+                   const matchText = m[0];
                    if ((matchText.includes(mName) || matchText.includes(mNum)) && matchText.includes(yNum)) {
                      const candidate = m[1].trim();
                      if (!isProbablyTariff(candidate)) {
@@ -899,15 +1139,15 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
           /uso\s+sistema\s+distrib\w*[\s\S]*?([0-9\.,]+)/i,
           /tusd\s+kwh\s+([0-9\.,]+)/i,
           /te\s+kwh\s+([0-9\.,]+)/i,
-          /TUSD[\s\S]*?kWh\s*([0-9\.,]+)/i,
-          /TE[\s\S]*?kWh\s*([0-9\.,]+)/i,
-          /Uso\s+Sistema[\s\S]*?kWh\s*([0-9\.,]+)/i,
-          /Uso\s+Sist[\s\S]*?\b([0-9\.,]+)\b/i,
-          /Consumo\s*-\s*TE[\s\S]*?\b([0-9\.,]+)\b/i,
-          /(?:USO\s+SIST\.?\s*DISTR\.?\s*\(TUSD\)|\bENERGIA\s*\(TE\))[\s\S]*?([0-9\.,]+)/i
+          /tusd[\s\S]*?kwh\s*([0-9\.,]+)/i,
+          /te[\s\S]*?kwh\s*([0-9\.,]+)/i,
+          /uso\s+sistema[\s\S]*?kwh\s*([0-9\.,]+)/i,
+          /uso\s+sist[\s\S]*?\b([0-9\.,]+)\b/i,
+          /consumo\s*-\s*te[\s\S]*?\b([0-9\.,]+)\b/i,
+          /(?:uso\s+sist\.?\s*distr\.?\s*\(tusd\)|\benergia\s*\(te\))[\s\S]*?([0-9\.,]+)/i
         ];
         for (const pattern of chargesPatterns) {
-          const match = text.match(pattern);
+          const match = normText.match(pattern);
           if (match) {
             const candidate = match[1].trim();
             if (!isProbablyTariff(candidate)) {
@@ -931,7 +1171,7 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
           /total\s+consumido\s*[:\- R$]*\s*\b([0-9\.,]+)\b/i
         ];
         for (const regex of specPatterns) {
-          const match = text.match(regex);
+          const match = normText.match(regex);
           if (match) {
             const candidate = match[1].trim();
             if (!isProbablyTariff(candidate)) {
@@ -944,23 +1184,24 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
 
       // 6. Proximity column-header vertical scanning for Consumption values (User requested nomenclatures)
       if (!value) {
-        const lines = text.split('\n');
         const consumptionHeaders = [
           'quant. faturada', 'quant.faturada', 'quantidade faturada',
           'quant.(kwh)', 'quant. (kwh)', 'quant.kwh', 'quant. kwh',
-          'consumo em kwh', 'consumo kwh', 'consumo de kwh', 'consumo mês', 'consumo mes',
-          'qtde kwh mês', 'qtde kwh mes', 'quantidade kwh', 'energia ativa', 'consumo/kwh', 'consumo / kwh'
+          'consumo em kwh', 'consumo kwh', 'consumo de kwh', 'consumo mes',
+          'qtde kwh mes', 'quantidade kwh', 'energia ativa', 'consumo/kwh', 'consumo / kwh'
         ];
         
         for (let i = 0; i < lines.length; i++) {
-          const lineLower = lines[i].toLowerCase();
+          const lineLower = lines[i]; // already normalized & lowercase!
           if (consumptionHeaders.some(kw => lineLower.includes(kw))) {
             let foundNum = "";
             let searchIdx = -1;
+            let matchedHeaderKeyword = "";
             for (const header of consumptionHeaders) {
               const pos = lineLower.indexOf(header);
               if (pos !== -1) {
                 searchIdx = pos;
+                matchedHeaderKeyword = header;
                 break;
               }
             }
@@ -985,16 +1226,30 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
             }
 
             // B. If not found, check next line for a valid numeric layout coordinate
-            if (i + 1 < lines.length) {
-              const matchesNext = [...lines[i+1].matchAll(/\b([0-9\.,]+)\b/g)];
-              for (const m of matchesNext) {
-                const rawNum = m[1];
-                if (rawNum && !rawNum.includes('/') && !rawNum.includes('-')) {
-                  const cleanVal = parseFloat(rawNum.replace(/\./g, '').replace(',', '.'));
-                  if (!isNaN(cleanVal) && cleanVal > 0 && cleanVal < 250000 && cleanVal !== 2025 && cleanVal !== 2026) {
-                    if (isProbablyTariff(rawNum)) continue;
+            if (i + 1 < lines.length && matchedHeaderKeyword) {
+              const matchedVal = findClosestValueByCoordinates(lines[i], lines[i+1], matchedHeaderKeyword, /\b([0-9\.,]+)\b/gi);
+              if (matchedVal) {
+                const rawNum = matchedVal.replace(/(\d)\s+(\d)/g, '$1$2').replace(/\s/g, '');
+                const cleanVal = parseFloat(rawNum.replace(/\./g, '').replace(',', '.'));
+                if (!isNaN(cleanVal) && cleanVal > 0 && cleanVal < 250000 && cleanVal !== 2025 && cleanVal !== 2026) {
+                  if (!isProbablyTariff(rawNum)) {
                     foundNum = rawNum;
-                    break;
+                  }
+                }
+              }
+              
+              // Fallback se o alinhamento não retornar mas há números
+              if (!foundNum) {
+                const matchesNext = [...lines[i+1].matchAll(/\b([0-9\.,]+)\b/g)];
+                for (const m of matchesNext) {
+                  const rawNum = m[1];
+                  if (rawNum && !rawNum.includes('/') && !rawNum.includes('-')) {
+                    const cleanVal = parseFloat(rawNum.replace(/\./g, '').replace(',', '.'));
+                    if (!isNaN(cleanVal) && cleanVal > 0 && cleanVal < 250000 && cleanVal !== 2025 && cleanVal !== 2026) {
+                      if (isProbablyTariff(rawNum)) continue;
+                      foundNum = rawNum;
+                      break;
+                    }
                   }
                 }
               }
@@ -1005,16 +1260,30 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
             }
 
             // C. Or look 2 lines ahead
-            if (i + 2 < lines.length) {
-              const matchesNext2 = [...lines[i+2].matchAll(/\b([0-9\.,]+)\b/g)];
-              for (const m of matchesNext2) {
-                const rawNum = m[1];
-                if (rawNum && !rawNum.includes('/') && !rawNum.includes('-')) {
-                  const cleanVal = parseFloat(rawNum.replace(/\./g, '').replace(',', '.'));
-                  if (!isNaN(cleanVal) && cleanVal > 0 && cleanVal < 250000 && cleanVal !== 2025 && cleanVal !== 2026) {
-                    if (isProbablyTariff(rawNum)) continue;
-                    foundNum = rawNum;
-                    break;
+            if (i + 2 < lines.length && matchedHeaderKeyword) {
+              const matchedVal2 = findClosestValueByCoordinates(lines[i], lines[i+2], matchedHeaderKeyword, /\b([0-9\.,]+)\b/gi);
+              if (matchedVal2) {
+                const rawNum2 = matchedVal2.replace(/(\d)\s+(\d)/g, '$1$2').replace(/\s/g, '');
+                const cleanVal2 = parseFloat(rawNum2.replace(/\./g, '').replace(',', '.'));
+                if (!isNaN(cleanVal2) && cleanVal2 > 0 && cleanVal2 < 250000 && cleanVal2 !== 2025 && cleanVal2 !== 2026) {
+                  if (!isProbablyTariff(rawNum2)) {
+                    foundNum = rawNum2;
+                  }
+                }
+              }
+              
+              // Fallback
+              if (!foundNum) {
+                const matchesNext2 = [...lines[i+2].matchAll(/\b([0-9\.,]+)\b/g)];
+                for (const m of matchesNext2) {
+                  const rawNum = m[1];
+                  if (rawNum && !rawNum.includes('/') && !rawNum.includes('-')) {
+                    const cleanVal = parseFloat(rawNum.replace(/\./g, '').replace(',', '.'));
+                    if (!isNaN(cleanVal) && cleanVal > 0 && cleanVal < 250000 && cleanVal !== 2025 && cleanVal !== 2026) {
+                      if (isProbablyTariff(rawNum)) continue;
+                      foundNum = rawNum;
+                      break;
+                    }
                   }
                 }
               }
@@ -1028,7 +1297,7 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
       }
 
       if (!value) {
-        const matchKwhSimple = text.match(/\b([0-9\.,]+)\s*kWh\b/i);
+        const matchKwhSimple = normText.match(/\b([0-9\.,]+)\s*kwh\b/i);
         if (matchKwhSimple) {
           const candidate = matchKwhSimple[1].trim();
           if (!isProbablyTariff(candidate)) {
@@ -1038,7 +1307,7 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
       }
 
       if (!value) {
-        const matchKwh = text.match(/(?:Consumo(?:\s+Ativo)?|Energia(?:\s+Ativa)?|Quantidade\s+Faturada|Consumo\s+do\s+Mês|Consumo\s+do\s+Mes|Leitura|Cons\.?|Consumo\s+Realizado)\s*[:\s\-#]*\s*([0-9\.,]+)\s*(?:kWh|kW|m3|m³)?/i);
+        const matchKwh = normText.match(/(?:consumo(?:\s+ativo)?|energia(?:\s+ativa)?|quantidade\s+faturada|consumo\s+do\s+mes|consumo\s+do\s+mes|leitura|cons\.?|consumo\s+realizado)\s*[:\s\-#]*\s*([0-9\.,]+)\s*(?:kwh|kw)?/i);
         if (matchKwh) {
           const candidate = matchKwh[1].trim();
           if (!isProbablyTariff(candidate)) {
@@ -1048,9 +1317,9 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
       }
 
       if (!value) {
-        const kwhIndex = text.toLowerCase().indexOf('kwh');
+        const kwhIndex = normText.indexOf('kwh');
         if (kwhIndex !== -1) {
-          const surroundingBefore = text.substring(Math.max(0, kwhIndex - 30), kwhIndex);
+          const surroundingBefore = normText.substring(Math.max(0, kwhIndex - 30), kwhIndex);
           const numMatch = surroundingBefore.match(/\b([0-9\.,]+)\s*$/);
           if (numMatch) {
             const candidate = numMatch[1].trim();
@@ -1096,47 +1365,50 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
       if (!value) {
         const valKeywords = [
           'total a pagar', 'valor total', 'total faturado', 'total da fatura', 'fatura',
-          'valor líquido', 'valor liquido', 'total do documento', 'total', 'net total', 'pago'
+          'valor liquido', 'total do documento', 'total', 'net total'
         ];
-        for (const kw of valKeywords) {
-          const regexVal = new RegExp(`${kw}\\s*[:\\- R$]*\\s*([0-9\\.\\t ]+,[0-9]{2})`, 'i');
-          const match = text.match(regexVal);
-          if (match) {
-            value = match[1].trim();
-            break;
+        for (let i = 0; i < lines.length; i++) {
+          const lineLower = lines[i]; // already normalized & lowercase!
+          const matchedKw = valKeywords.find(kw => lineLower.includes(kw));
+          if (matchedKw) {
+            const pricePattern = /(?:r\$)?\s*([0-9\.]+,[0-9]{2})/i;
+            
+            if (i + 1 < lines.length) {
+              const matchedVal = findClosestValueByCoordinates(lines[i], lines[i+1], matchedKw, pricePattern);
+              if (matchedVal) {
+                value = matchedVal;
+                break;
+              }
+            }
+            
+            const matchedValCurr = findClosestValueByCoordinates(lines[i], lines[i], matchedKw, pricePattern);
+            if (matchedValCurr) {
+              value = matchedValCurr;
+              break;
+            }
+            
+            if (i + 2 < lines.length) {
+              const matchedVal2 = findClosestValueByCoordinates(lines[i], lines[i+2], matchedKw, pricePattern);
+              if (matchedVal2) {
+                value = matchedVal2;
+                break;
+              }
+            }
           }
         }
       }
 
       if (!value) {
-        // Line-by-line look-ahead vertical scanning for Total Value
-        const lines = text.split('\n');
         const valKeywords = [
           'total a pagar', 'valor total', 'total faturado', 'total da fatura', 'fatura',
-          'valor líquido', 'valor liquido', 'total do documento', 'total'
+          'valor liquido', 'total do documento', 'total', 'net total', 'pago'
         ];
-        for (let i = 0; i < lines.length; i++) {
-          const lineLower = lines[i].toLowerCase();
-          if (valKeywords.some(kw => lineLower.includes(kw))) {
-            const matchCurr = lines[i].match(/(?:R\$)?\s*([0-9\.]+,[0-9]{2})/i);
-            if (matchCurr) {
-              value = matchCurr[1].trim();
-              break;
-            }
-            if (i + 1 < lines.length) {
-              const matchNext = lines[i+1].match(/(?:R\$)?\s*([0-9\.]+,[0-9]{2})/i);
-              if (matchNext) {
-                value = matchNext[1].trim();
-                break;
-              }
-            }
-            if (i + 2 < lines.length) {
-              const matchNext2 = lines[i+2].match(/(?:R\$)?\s*([0-9\.]+,[0-9]{2})/i);
-              if (matchNext2) {
-                value = matchNext2[1].trim();
-                break;
-              }
-            }
+        for (const kw of valKeywords) {
+          const regexVal = new RegExp(`${kw}\\s*[:\\- r$]*\\s*([0-9\\.\\t ]+,[0-9]{2})`, 'i');
+          const match = normText.match(regexVal);
+          if (match) {
+            value = match[1].trim();
+            break;
           }
         }
       }
@@ -1244,6 +1516,31 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
 }
 
 /**
+ * Checks if a specific page's extracted text is a corporate protocol page
+ * (receipt, MM Delivery/DIAS cover/tracking sheet) rather than the actual utility invoice.
+ */
+export function isProtocolPage(pageText: string): boolean {
+  if (!pageText) return false;
+  const upper = pageText.toUpperCase();
+  
+  return (
+    upper.includes("PROTOCOLO DE ACOMPANHAMENTO") ||
+    upper.includes("ACOMPANHAMENTO DE NF") ||
+    upper.includes("DEPARTAMENTO DE COMPRAS") ||
+    upper.includes("PROTOCOLO DE ENTREGA") ||
+    upper.includes("PROTOCOLO DE RECEBIMENTO") ||
+    (upper.includes("DIAS ENTREGADORA") && upper.includes("PROTOCOLO")) ||
+    (upper.includes("DELIVERY TRANSPORTES") && upper.includes("PROTOCOLO")) ||
+    upper.includes("QUANTIDADE DE PARCELAS:") ||
+    upper.includes("DATA DE VENCIMENTO - PARCELA") ||
+    upper.includes("ASSINATURA DO APROVADOR") ||
+    upper.includes("NOME DO EMITENTE:") ||
+    upper.includes("DATA RECEBIMENTO NA MATRIZ") ||
+    upper.includes("OBS: ENVIADO VIA EMAIL?")
+  );
+}
+
+/**
  * Parses binary base64 PDF using unpdf to extract clean plain text
  */
 export async function extractPDFText(base64Data: string): Promise<string> {
@@ -1252,12 +1549,34 @@ export async function extractPDFText(base64Data: string): Promise<string> {
   const uint8Array = new Uint8Array(buffer);
   
   try {
-    const { text } = await extractText(uint8Array);
-    if (!text) return "";
-    if (Array.isArray(text)) {
-      return text.join("\n");
+    const result = await extractText(uint8Array) as any;
+    if (!result) return "";
+
+    // 1. Check if the unpdf library returned page objects
+    if (result.pages && Array.isArray(result.pages)) {
+      const nonProtocolPages = result.pages.filter((p: any) => !isProtocolPage(p.text));
+      console.log(`[Unpdf Extractor] Excluídos ${result.pages.length - nonProtocolPages.length} de ${result.pages.length} páginas por serem identificadas como protocolo de acompanhamento.`);
+      return nonProtocolPages.map((p: any) => p.text).join("\n");
     }
-    return text || "";
+
+    // 2. Check if the text property is returned as an array representing pages
+    const textVal = result.text;
+    if (Array.isArray(textVal)) {
+      const nonProtocolPageTexts = textVal.filter((pageStr: string) => !isProtocolPage(pageStr));
+      console.log(`[Unpdf Extractor] Excluídos ${textVal.length - nonProtocolPageTexts.length} de ${textVal.length} blocos de página por filtro de protocolo.`);
+      return nonProtocolPageTexts.join("\n");
+    }
+
+    // 3. Fallback to single text block (extractFieldsWithRegex will also apply line filters)
+    if (typeof textVal === "string") {
+      if (isProtocolPage(textVal)) {
+        console.log(`[Unpdf Extractor] O texto completo do documento foi identificado como protocolo e descartado.`);
+        return "";
+      }
+      return textVal;
+    }
+
+    return "";
   } catch (err: any) {
     console.error("[unpdf Extraction Error]", err);
     throw new Error(`Falha ao decodificar texto digital do PDF: ${err.message}`);
