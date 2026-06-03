@@ -21,7 +21,7 @@ export interface QueueItem {
   rawSummary?: string;
   uploadedAt: string;
   processedAt?: string;
-  extractionMethod?: 'direct' | 'ai' | 'ocr-space' | 'ocr-space-only';
+  extractionMethod?: 'direct' | 'ai' | 'ocr-space' | 'ocr-space-only' | 'google-vision' | 'google-vision-only';
 }
 
 export interface ProcessingStats {

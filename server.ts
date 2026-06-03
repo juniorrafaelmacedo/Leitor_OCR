@@ -151,7 +151,7 @@ interface ServerQueueItem {
   rawSummary?: string;
   uploadedAt: string;
   processedAt?: string;
-  extractionMethod?: 'direct' | 'ai' | 'ocr-space' | 'ocr-space-only';
+  extractionMethod?: 'direct' | 'ai' | 'ocr-space' | 'ocr-space-only' | 'google-vision' | 'google-vision-only';
   fields: ExtractionField[]; // Store fields to extract
 }
 
@@ -161,12 +161,143 @@ const fileContentsMap = new Map<string, string>(); // id -> base64
 let activeWorkers = 0;
 let maxConcurrency = 1; // Default to 1 (economic/free plan auto-scaled)
 let queueDelayMs = 4500; // Default cooldown delay 4.5s between files to safely stay standard below 15 RPM (free tier limits)
-let extractionMode: 'hybrid' | 'direct' | 'ai' | 'ocr-space' | 'ocr-space-only' = 'ocr-space-only';
+let extractionMode: 'hybrid' | 'direct' | 'ai' | 'ocr-space' | 'ocr-space-only' | 'google-vision' | 'google-vision-only' = 'ocr-space-only';
 let isQueuePaused = false;
 let maxRetries = 3; // sensible default max attempts, to allow fast failover and not block on a stuck file
 let ocrApiKey = "K88221884388957";
 let ocrEngine = "2";
 let ocrLanguage = "por";
+let googleVisionApiKey = process.env.GOOGLE_CLOUD_VISION_API_KEY || "";
+
+async function performGoogleVisionOcr(
+  base64Data: string,
+  fileName: string,
+  apiKey: string
+): Promise<string> {
+  if (!apiKey) {
+    throw new Error("Chave de API do Google Cloud Vision não configurada. Configure a chave nas Configurações Avançadas para poder usar esta opção.");
+  }
+
+  const isPdf = fileName.toLowerCase().endsWith(".pdf");
+  
+  // Clean raw base64 data to get exact pure data blocks
+  let cleanBase64 = base64Data;
+  const base64PartsMatch = base64Data.match(/^data:([^;]+);base64,(.*)$/);
+  if (base64PartsMatch) {
+    cleanBase64 = base64PartsMatch[2];
+  } else {
+    cleanBase64 = base64Data.replace(/^data:application\/pdf;base64,/, "")
+                            .replace(/^data:image\/png;base64,/, "")
+                            .replace(/^data:image\/jpeg;base64,/, "")
+                            .replace(/^data:image\/jpg;base64,/, "")
+                            .replace(/^data:image\/webp;base64,/, "");
+  }
+
+  if (isPdf) {
+    const endpoint = `https://vision.googleapis.com/v1/files:annotate?key=${apiKey}`;
+    const payload = {
+      requests: [
+        {
+          inputConfig: {
+            content: cleanBase64,
+            mimeType: "application/pdf"
+          },
+          features: [
+            {
+              type: "DOCUMENT_TEXT_DETECTION"
+            }
+          ],
+          pages: [1, 2, 3, 4, 5] // Annotate up to first 5 pages mapping
+        }
+      ]
+    };
+
+    console.log(`[Google Vision API] Chamando files:annotate para ${fileName}`);
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+      throw new Error(`Google Vision API (files:annotate) falhou com status ${response.status}: ${response.statusText}`);
+    }
+
+    const data: any = await response.json();
+    if (data.error) {
+      throw new Error(`Google Vision API retornou erro: ${data.error.message || JSON.stringify(data.error)}`);
+    }
+
+    const fileResponses = data.responses;
+    if (!fileResponses || !Array.isArray(fileResponses) || fileResponses.length === 0) {
+      throw new Error("Nenhuma resposta recebida do Google Vision API para o arquivo PDF.");
+    }
+
+    const pageResponses = fileResponses[0].responses;
+    if (!pageResponses || !Array.isArray(pageResponses) || pageResponses.length === 0) {
+      throw new Error("O Google Vision API não retornou páginas processadas para o arquivo PDF.");
+    }
+
+    const texts = pageResponses
+      .map((pr: any) => pr.fullTextAnnotation?.text || "")
+      .filter((t: string) => t.length > 0);
+
+    if (texts.length === 0) {
+      throw new Error("O Google Vision API retornou páginas processadas, mas nenhum texto pôde ser extraído.");
+    }
+
+    return texts.join("\n");
+  } else {
+    const endpoint = `https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`;
+    const payload = {
+      requests: [
+        {
+          image: {
+            content: cleanBase64
+          },
+          features: [
+            {
+              type: "DOCUMENT_TEXT_DETECTION"
+            }
+          ]
+        }
+      ]
+    };
+
+    console.log(`[Google Vision API] Chamando images:annotate para ${fileName}`);
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+      throw new Error(`Google Vision API (images:annotate) falhou com status ${response.status}: ${response.statusText}`);
+    }
+
+    const data: any = await response.json();
+    if (data.error) {
+      throw new Error(`Google Vision API retornou erro: ${data.error.message || JSON.stringify(data.error)}`);
+    }
+
+    const responses = data.responses;
+    if (!responses || !Array.isArray(responses) || responses.length === 0) {
+      throw new Error("Nenhuma resposta recebida do Google Vision API para a imagem.");
+    }
+
+    const extractedText = responses[0].fullTextAnnotation?.text || "";
+    if (!extractedText || extractedText.trim().length === 0) {
+      throw new Error("O Google Vision API não conseguiu identificar nenhum texto legível nesta imagem.");
+    }
+
+    return extractedText;
+  }
+}
+
 
 async function performOcrSpace(
   base64Data: string,
@@ -194,43 +325,66 @@ async function performOcrSpace(
 
   console.log(`[ocr.space] Iniciando requisição para ${endpoint} usando Engine: ${engine} e Idioma: ${language}`);
   
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: params.toString(),
-  });
+  let attempts = 0;
+  const maxOcrAttempts = 4;
 
-  if (!response.ok) {
-    if (response.status === 413) {
-      throw new Error("O arquivo enviado é grande demais para a API do ocr.space (Limite máximo: 1MB). DICA: Para arquivos maiores que 1MB, altere o Perfil de Extração no painel superior para 'Híbrido' (Padrão) ou 'Apenas IA (Gemini)'. O Gemini processa PDFs ou imagens de até 20MB de forma instantânea e com precisão profissional, sem esse limite de tamanho!");
+  while (attempts < maxOcrAttempts) {
+    attempts++;
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: params.toString(),
+      });
+
+      if (!response.ok) {
+        if (response.status === 429 && attempts < maxOcrAttempts) {
+          const waitTime = attempts * 3000 + Math.floor(Math.random() * 2000);
+          console.warn(`[ocr.space] Status 429 (Too Many Requests). Aguardando ${waitTime}ms para tentar novamente (Tentativa ${attempts}/${maxOcrAttempts})...`);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+          continue;
+        }
+        if (response.status === 413) {
+          throw new Error("O arquivo enviado é grande demais para a API do ocr.space (Limite máximo: 1MB). DICA: Para arquivos maiores que 1MB, altere o Perfil de Extração no painel superior para 'Híbrido' (Padrão) ou 'Apenas IA (Gemini)'. O Gemini processa PDFs ou imagens de até 20MB de forma instantânea e com precisão profissional, sem esse limite de tamanho!");
+        }
+        throw new Error(`Erro na rede da API ocr.space: status ${response.status} (${response.statusText})`);
+      }
+
+      const result: any = await response.json();
+
+      if (result.IsErroredOnProcessing) {
+        const errorDetails = (Array.isArray(result.ErrorMessage) ? result.ErrorMessage.join(", ") : result.ErrorMessage) || result.ErrorDetails || "Erro desconhecido no processamento do OCR.";
+        throw new Error(`A API ocr.space falhou: ${errorDetails}`);
+      }
+
+      const parsedResults = result.ParsedResults;
+      if (!parsedResults || !Array.isArray(parsedResults) || parsedResults.length === 0) {
+        if (result.ErrorMessage) {
+          throw new Error(`Falha no OCR: ${result.ErrorMessage}`);
+        }
+        throw new Error("A API ocr.space não conseguiu extrair nenhum texto desse documento.");
+      }
+
+      // Concatenate parsed texts from all pages (for multi-page pdfs, etc)
+      const extractedText = parsedResults.map((r: any) => r.ParsedText).join("\n");
+      if (!extractedText || extractedText.trim().length === 0) {
+        throw new Error("O texto extraído pela API ocr.space está inteiramente vazio. Verifique a legibilidade ou formato do arquivo.");
+      }
+
+      return extractedText;
+    } catch (err: any) {
+      if (attempts >= maxOcrAttempts) {
+        throw err;
+      }
+      const waitTime = attempts * 3000 + Math.floor(Math.random() * 2000);
+      console.warn(`[ocr.space] Erro na requisição: ${err.message}. Retentando em ${waitTime}ms... (Tentativa ${attempts}/${maxOcrAttempts})`);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
     }
-    throw new Error(`Erro na rede da API ocr.space: status ${response.status} (${response.statusText})`);
   }
 
-  const result: any = await response.json();
-
-  if (result.IsErroredOnProcessing) {
-    const errorDetails = (Array.isArray(result.ErrorMessage) ? result.ErrorMessage.join(", ") : result.ErrorMessage) || result.ErrorDetails || "Erro desconhecido no processamento do OCR.";
-    throw new Error(`A API ocr.space falhou: ${errorDetails}`);
-  }
-
-  const parsedResults = result.ParsedResults;
-  if (!parsedResults || !Array.isArray(parsedResults) || parsedResults.length === 0) {
-    if (result.ErrorMessage) {
-      throw new Error(`Falha no OCR: ${result.ErrorMessage}`);
-    }
-    throw new Error("A API ocr.space não conseguiu extrair nenhum texto desse documento.");
-  }
-
-  // Concatenate parsed texts from all pages (for multi-page pdfs, etc)
-  const extractedText = parsedResults.map((r: any) => r.ParsedText).join("\n");
-  if (!extractedText || extractedText.trim().length === 0) {
-    throw new Error("O texto extraído pela API ocr.space está inteiramente vazio. Verifique a legibilidade ou formato do arquivo.");
-  }
-
-  return extractedText;
+  throw new Error("Falha ao obter resposta estável do OCR Space após múltiplas tentativas de retry.");
 }
 
 // Worker method to process a single item
@@ -248,51 +402,48 @@ async function runWorker(itemToProcess: ServerQueueItem) {
 
     itemToProcess.progress = 30;
 
-    // Tenta primeiro a extração direta de texto (PDF Digital) + Regex
+    // Tenta primeiro a extração direta de texto (PDF Digital) para qualquer modo, para economizar cota e evitar 429
     let cleanText = "";
     let directRegexData: Record<string, any> | null = null;
+    let isDigitalPdf = false;
 
-    if (extractionMode === 'hybrid' || extractionMode === 'direct') {
+    if (itemToProcess.fileName.toLowerCase().endsWith(".pdf")) {
       try {
-        console.log(`[QueueWorker] Tentando extrair texto digital para o arquivo: ${itemToProcess.fileName}`);
+        console.log(`[QueueWorker] Pré-verificação: tentando decodificar texto digital direto para o arquivo: ${itemToProcess.fileName}`);
         cleanText = (await extractPDFText(base64Data)) || "";
         cleanText = cleanText.trim();
         
-        if (cleanText.length > 25) {
-          console.log(`[QueueWorker] Texto digital encontrado (${cleanText.length} caracteres). Aplicando heurísticas regex...`);
-          directRegexData = extractFieldsWithRegex(cleanText, itemToProcess.fields);
+        if (cleanText.length > 50) {
+          isDigitalPdf = true;
+          console.log(`[QueueWorker] Texto digital obtido localmente (${cleanText.length} caracteres).`);
         }
       } catch (err: any) {
-        console.warn(`[QueueWorker] Erro ou ausência de texto digital no arquivo ${itemToProcess.fileName}: ${err.message}`);
+        console.warn(`[QueueWorker] Erro ao tentar extrair texto digital direto para ${itemToProcess.fileName}: ${err.message}`);
       }
     }
 
-    // Se estiver no modo Apenas Direto ou no modo Híbrido com sucesso na captura dos campos obrigatórios
-    if (directRegexData) {
-      const requiredFields = itemToProcess.fields.filter(f => f.required).map(f => f.name);
-      
-      // No modo direct, aceitamos sempre. No modo hybrid, aceitamos se tiver achado os campos obrigatórios
-      const hasAllRequired = requiredFields.every(name => {
-        const val = directRegexData ? directRegexData[name] : "";
-        return val !== undefined && val !== null && String(val).trim().length > 0;
-      });
+    if (extractionMode === 'direct' || (extractionMode === 'ocr-space-only' && isDigitalPdf)) {
+      if (cleanText.length > 25) {
+        console.log(`[QueueWorker] Texto digital encontrado. Aplicando heurísticas regex locais...`);
+        directRegexData = extractFieldsWithRegex(cleanText, itemToProcess.fields);
+      }
 
-      if (extractionMode === 'direct' || (extractionMode === 'hybrid' && hasAllRequired)) {
+      if (directRegexData) {
         console.log(`[QueueWorker] Sucesso! Usando Extração Digital Direta instantânea (Cota 0) para o arquivo: ${itemToProcess.fileName}`);
         itemToProcess.extractedData = directRegexData;
-        itemToProcess.rawSummary = "Extraído instantaneamente offline com motor de decodificação digital (Sem IA / Sem custo / Quota impecável).";
+        itemToProcess.rawSummary = "Extraído offline por decodificador digital direto e mapeamento Regex local (Custo Zero total, sem usar IA ou OCR Space).";
         itemToProcess.status = 'completed';
         itemToProcess.progress = 100;
         itemToProcess.processedAt = new Date().toISOString();
         // @ts-ignore
-        itemToProcess.extractionMethod = 'direct';
+        itemToProcess.extractionMethod = 'ocr-space-only';
         return;
       } else {
-        console.log(`[QueueWorker] Modo Híbrido: Texto digital parseado mas faltam campos obrigatórios. Escalando para Gemini AI.`);
+        if (extractionMode === 'direct') {
+          throw new Error("Este documento é uma imagem, PDF escaneado ou não possui texto passível de regex local. Como você selecionou o modo 'Apenas Texto Digital (Sem IA)', altere para o perfil Híbrido para ler via inteligência artificial.");
+        }
+        // Se for ocr-space-only mas falhou em extrair regex ou algo, deixaremos cair na API OCR Space
       }
-    } else if (extractionMode === 'direct') {
-      // Se for apenas direto mas não extraiu texto algum (PDF escaneado/imagem)
-      throw new Error("Este documento é uma imagem ou PDF escaneado. Como você selecionou o modo 'Apenas Texto Digital (Sem IA)', altere para o perfil Híbrido no controle para ler via Gemini.");
     }
 
     // Build schema based on target fields
@@ -349,44 +500,84 @@ Sua tarefa é analisar o documento (PDF ou imagem) e preencher os dados solicita
 Instruções importantes:
 1. Caso um campo não esteja explicitamente presente no documento, coloque um valor vazio ("") ou nulo.
 2. Formate datas no padrão brasileiro DD/MM/YYYY (exemplo: 15/05/2026) caso faça sentido.
-3. Não invente ou alucine informações. Transcreva estritamente as informações presentes de maneira fidedigna.`;
+3. Não invente ou alucine informações. Transcreva estritamente as informações presentes de maneira fidedigna.
+4. ATENÇÃO CRÍTICA: Desconsidere COMPLETAMENTE qualquer página de capa ou "PROTOCOLO DE ACOMPANHAMENTO DE NF" (como o cabeçalho de transporte da MM Delivery/MM Transportes que costuma ser a última página do PDF). NÃO extraia de forma alguma valores de consumo, vencimento, UC ou valor dessa página de protocolo de entrega/acompanhamento. Colete as informações exclusivamente das páginas oficiais da fatura de energia da concessionária (Enel, CPFL, Energisa, etc.), onde os dados reais de consumo (kWh), faturamentos e datas de leitura estão impressos oficialmente pelo emissor do boleto.`;
 
     itemToProcess.progress = 55;
 
     let response;
-    let methodUsed: 'ai' | 'ocr-space' | 'ocr-space-only' = 'ai';
+    let methodUsed: 'direct' | 'ai' | 'ocr-space' | 'ocr-space-only' | 'google-vision' | 'google-vision-only' = 'ai';
+    let ocrText = "";
+    let ocrFailed = false;
 
-    if (extractionMode === 'ocr-space-only') {
-      methodUsed = 'ocr-space-only';
-      itemToProcess.retryMessage = `Chamando ocr.space (Engine: ${ocrEngine}, Idioma: ${ocrLanguage})...`;
-      const ocrText = await performOcrSpace(base64Data, ocrApiKey, ocrEngine, ocrLanguage);
-      
-      itemToProcess.progress = 80;
-      itemToProcess.retryMessage = "Processando OCR via Regras/Regex locais (Sem IA)...";
+    // Se estiver em modo OCR Space (com ou sem IA), tenta obter o texto via API ocr.space (apenas se não for texto digital offline)
+    if ((extractionMode === 'ocr-space' || extractionMode === 'ocr-space-only') && !isDigitalPdf) {
+      try {
+        methodUsed = extractionMode;
+        itemToProcess.retryMessage = `Chamando ocr.space (Engine: ${ocrEngine}, Idioma: ${ocrLanguage})...`;
+        ocrText = await performOcrSpace(base64Data, ocrApiKey, ocrEngine, ocrLanguage);
+      } catch (ocrErr: any) {
+        console.warn(`[QueueWorker] Falha na API ocr.space para ${itemToProcess.fileName}: ${ocrErr.message}`);
+        ocrFailed = true;
+        
+        if (extractionMode === 'ocr-space-only') {
+          throw new Error(`Falha no leitor de texto externo (OCR Space): ${ocrErr.message}. Como o seu perfil selecionado é de custo zero livre de IA ('Somente OCR Space'), a IA do Gemini foi desativada e bloqueada para poupar créditos.`);
+        }
 
-      const ocrRegexData = extractFieldsWithRegex(ocrText, itemToProcess.fields);
-      
-      itemToProcess.extractedData = ocrRegexData;
-      itemToProcess.rawSummary = "Texto lido via OCR Space e mapeado por regex local (Zero custo / Sem IA).\n\nTexto Extraído:\n" + ocrText.slice(0, 450) + (ocrText.length > 450 ? "..." : "");
-      itemToProcess.status = 'completed';
-      itemToProcess.progress = 100;
-      itemToProcess.processedAt = new Date().toISOString();
-      itemToProcess.extractionMethod = 'ocr-space-only';
-      return;
+        // Mudar tipo e registrar para a fila o aviso de escalonamento silencioso
+        itemToProcess.retryMessage = `⚠️ Limite do OCR Space atingido ou arquivo > 1MB (${ocrErr.message.split('.')[0]}). Escalonando automaticamente para Gemini Vision...`;
+        console.log(`[QueueWorker] Escalonamento ativo: Direcionando lote ${itemToProcess.fileName} para processamento multimodal Gemini.`);
+      }
     }
 
-    if (extractionMode === 'ocr-space') {
-      methodUsed = 'ocr-space';
-      itemToProcess.retryMessage = `Chamando ocr.space (Engine: ${ocrEngine}, Idioma: ${ocrLanguage})...`;
-      const ocrText = await performOcrSpace(base64Data, ocrApiKey, ocrEngine, ocrLanguage);
-      
-      itemToProcess.progress = 75;
-      itemToProcess.retryMessage = "Texto OCR obtido! Solicitando estruturação do Gemini...";
+    // Se estiver em modo Google Vision (com ou sem IA), tenta obter o texto via Google Vision API (apenas se não for texto digital offline)
+    if ((extractionMode === 'google-vision' || extractionMode === 'google-vision-only') && !isDigitalPdf) {
+      try {
+        methodUsed = extractionMode;
+        itemToProcess.retryMessage = `Chamando Google Vision API...`;
+        ocrText = await performGoogleVisionOcr(base64Data, itemToProcess.fileName, googleVisionApiKey);
+      } catch (visionErr: any) {
+        console.warn(`[QueueWorker] Falha na Google Vision API para ${itemToProcess.fileName}: ${visionErr.message}`);
+        ocrFailed = true;
+        
+        if (extractionMode === 'google-vision-only') {
+          throw new Error(`Falha no leitor de texto externo (Google Vision API): ${visionErr.message}. Como o seu perfil selecionado é 'Somente Google Vision (Sem IA)', a IA do Gemini foi desativada e bloqueada.`);
+        }
 
-      const promptWithOcrText = `Você é um assistente especialista em leitura de documentos, OCR e extração estruturada de dados.
-Sua tarefa é analisar o texto extraído de uma fatura/documento pelo leitor óptico ocr.space e preencher os dados solicitados exatamente conforme definido no esquema de resposta em JSON.
+        // Mudar tipo e registrar para a fila o aviso de escalonamento silencioso
+        itemToProcess.retryMessage = `⚠️ Falha no Google Vision (${visionErr.message.split('.')[0]}). Escalonando automaticamente para Gemini Vision...`;
+        console.log(`[QueueWorker] Escalonamento ativo: Direcionando lote ${itemToProcess.fileName} para processamento multimodal Gemini.`);
+      }
+    }
 
-Texto extraído por OCR ocr.space:
+    // Se obtivemos o texto via OCR Space ou Google Vision com sucesso, processamos dependendo da estratégia escolhida
+    if (ocrText && !ocrFailed) {
+      if (extractionMode === 'ocr-space-only' || extractionMode === 'google-vision-only') {
+        itemToProcess.progress = 80;
+        itemToProcess.retryMessage = "Processando texto com Regex locais...";
+        
+        const ocrRegexData = extractFieldsWithRegex(ocrText, itemToProcess.fields);
+        
+        // CUSTO ZERO ESTRETO / VISION DIRECT: Salva o resultado diretamente das expressões regulares sem acionar IA
+        itemToProcess.extractedData = ocrRegexData;
+        itemToProcess.rawSummary = extractionMode === 'google-vision-only'
+          ? "Processamento concluído com Google Cloud Vision API + Regex locais (Sem usar IA do Gemini)."
+          : "Processamento concluído com custo zero total (sem requisição para IAs). Extraído via OCR Space + Regex locais.";
+        itemToProcess.status = 'completed';
+        itemToProcess.progress = 100;
+        itemToProcess.processedAt = new Date().toISOString();
+        itemToProcess.extractionMethod = extractionMode;
+        return;
+      } else {
+        // Modo 'ocr-space' ou 'google-vision': envia o texto estruturado limpo para processamento do Gemini
+        itemToProcess.progress = 75;
+        itemToProcess.retryMessage = extractionMode === 'google-vision'
+          ? "Texto do Google Vision obtido com sucesso! Solicitando refinamento estruturado ao Gemini..."
+          : "Texto OCR obtido com sucesso! Solicitando refinamento estruturado ao Gemini...";
+        const promptWithOcrText = `Você é um assistente especialista em leitura de documentos, OCR e extração estruturada de dados.
+Sua tarefa é analisar o texto extraído de uma fatura/documento pelo leitor óptico ${extractionMode === 'google-vision' ? 'Google Cloud Vision' : 'ocr.space'} e preencher os dados solicitados exatamente conforme definido no esquema de resposta em JSON.
+
+Texto extraído por OCR ${extractionMode === 'google-vision' ? 'Google Cloud Vision' : 'ocr.space'}:
 ------------------------------------------
 ${ocrText}
 ------------------------------------------
@@ -394,47 +585,95 @@ ${ocrText}
 Instruções importantes:
 1. Caso um campo não esteja explicitamente presente no documento, coloque um valor vazio ("") ou nulo.
 2. Formate datas no padrão brasileiro DD/MM/YYYY (exemplo: 15/05/2026) caso faça sentido.
-3. Não invente ou alucine informações. Transcreva estritamente as informações presentes de maneira fidedigna.`;
+3. Não invente ou alucine informações. Transcreva estritamente as informações presentes de maneira fidedigna.
+4. ATENÇÃO CRÍTICA: Desconsidere COMPLETAMENTE qualquer página de capa ou "PROTOCOLO DE ACOMPANHAMENTO DE NF" (como o cabeçalho de transporte da MM Delivery/MM Transportes que costuma ser a última página do PDF). NÃO extraia de forma alguma valores de consumo, vencimento, UC ou valor de faturamento dessa página de protocolo de entrega/acompanhamento. Colete as informações exclusivamente das páginas oficiais da fatura de energia da concessionária (Enel, CPFL, Energisa, etc.), onde os dados reais de consumo (kWh), faturamentos e datas de leitura estão impressos oficialmente pelo emissor do boleto.`;
 
-      response = await callGeminiWithRetry(gemini, {
-        model: 'gemini-3.5-flash',
-        contents: [promptWithOcrText],
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: propertiesSchema,
-            required: requiredList
-          }
-        }
-      }, maxRetries, (msg) => {
-        itemToProcess.retryMessage = msg;
-      });
-    } else {
-      methodUsed = 'ai';
-      response = await callGeminiWithRetry(gemini, {
-        model: 'gemini-3.5-flash',
-        contents: [
-          {
-            inlineData: {
-              mimeType: mimeType,
-              data: cleanBase64
+        response = await callGeminiWithRetry(gemini, {
+          model: 'gemini-3.5-flash',
+          contents: [promptWithOcrText],
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: propertiesSchema,
+              required: requiredList
             }
-          },
-          promptText
-        ],
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: propertiesSchema,
-            required: requiredList
           }
-        }
-      }, maxRetries, (msg) => {
-        // Atualizar mensagem de reporte que vai pro poll do front-end
-        itemToProcess.retryMessage = msg;
-      });
+        }, maxRetries, (msg) => {
+          itemToProcess.retryMessage = msg;
+        });
+      }
+    }
+
+    // Se o processamento OCR falhou ou o modo escolhido for puramente baseado em IA, faz o fallback inteligente para o Gemini
+    if (!response) {
+      if (extractionMode === 'ocr-space-only' || extractionMode === 'google-vision-only') {
+        throw new Error(`Erro no processamento de custo zero via ${extractionMode === 'google-vision-only' ? 'Google Cloud Vision' : 'OCR Space'}. Como você selecionou o modo exclusivo de OCR sem IA do Gemini, o processamento inteligente foi bloqueado.`);
+      }
+
+
+      if ((extractionMode === 'hybrid' || extractionMode === 'ocr-space') && cleanText && cleanText.length > 50) {
+        methodUsed = 'ai';
+        itemToProcess.retryMessage = "Texto digital extraído! Enviando texto otimizado ao Gemini...";
+        
+        const promptWithText = `Você é um assistente especialista em leitura de documentos, OCR e extração estruturada de dados.
+Sua tarefa é analisar o texto extraído de uma fatura/documento de energia e preencher os dados solicitados exatamente conforme definido no esquema de resposta em JSON.
+
+Texto do documento:
+------------------------------------------
+${cleanText}
+------------------------------------------
+
+Instruções importantes:
+1. Caso um campo não esteja explicitamente presente no documento, coloque um valor vazio ("") ou nulo.
+2. Formate datas no padrão brasileiro DD/MM/YYYY (exemplo: 15/05/2026) caso faça sentido.
+3. Não invente ou alucine informações. Transcreva estritamente as informações presentes de maneira fidedigna.
+4. ATENÇÃO CRÍTICA: Desconsidere COMPLETAMENTE qualquer página de capa ou "PROTOCOLO DE ACOMPANHAMENTO DE NF" (como o cabeçalho de transporte da MM Delivery/MM Transportes que costuma ser a última página do PDF). NÃO extraia de forma alguma valores de consumo, vencimento, UC ou valor dessa página de protocolo de entrega/acompanhamento. Colete as informações exclusivamente das páginas oficiais da fatura de energia da concessionária (Enel, CPFL, Energisa, etc.), onde os dados reais de consumo (kWh), faturamentos e datas de leitura estão impressos oficialmente pelo emissor do boleto.`;
+
+        response = await callGeminiWithRetry(gemini, {
+          model: 'gemini-3.5-flash',
+          contents: [promptWithText],
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: propertiesSchema,
+              required: requiredList
+            }
+          }
+        }, maxRetries, (msg) => {
+          itemToProcess.retryMessage = msg;
+        });
+      } else {
+        // Envia o arquivo de imagem ou PDF como payload multimodal diretamente pra IA
+        methodUsed = 'ai';
+        itemToProcess.retryMessage = ocrFailed 
+          ? "⚡ Escalonado para IA Multimodal (Gemini Vision)..." 
+          : "Enviando arquivo multimodal diretamente ao Gemini...";
+          
+        response = await callGeminiWithRetry(gemini, {
+          model: 'gemini-3.5-flash',
+          contents: [
+            {
+              inlineData: {
+                mimeType: mimeType,
+                data: cleanBase64
+              }
+            },
+            promptText
+          ],
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: propertiesSchema,
+              required: requiredList
+            }
+          }
+        }, maxRetries, (msg) => {
+          itemToProcess.retryMessage = msg;
+        });
+      }
     }
 
     itemToProcess.progress = 85;
@@ -486,7 +725,7 @@ Instruções importantes:
     
     let errorMsg = error?.message || "Ocorreu um erro desconhecido durante o OCR com Gemini.";
     if (String(errorMsg).includes("429") || String(errorMsg).includes("Quota exceeded") || String(errorMsg).includes("RESOURCE_EXHAUSTED") || String(errorMsg).includes("limit: 20")) {
-      errorMsg = "Limite de Quotas do Gemini excedido (HTTP 429). Motivo: A sua chave de API ultrapassou os limites do canais do plano gratuito (e.g. 15 requisições por minuto ou cota diária de 20 requests). DICA: Cadastre um plano de pagamento básico sem custo fixo (Pay-As-You-Go) no Google AI Studio para obter canais de alta velocidade e limites ultra elevados (geralmente gratuitas até limites massivos ou custando menos de R$ 0,05 centavos por lote).";
+      errorMsg = "Limite de Quotas do Gemini excedido (HTTP 429). IMPORTANTE: Se você já cadastrou um plano de pagamento básico Pay-As-You-Go, este erro indica que você atingiu o limite de TPM (Tokens por Minuto) ou RPM (Requisições por Minuto) do seu projeto do Google Cloud. Como faturas em PDF e imagens são arquivos muito pesados (~258 mil tokens por página), enviar vários lotes ao mesmo tempo pode estourar este limite temporariamente. DICA 1: No painel de Ajustes de Fila (topo direito), aumente o 'Intervalo entre Faturas' (ex: para 8 a 15 segundos) para calibrar a velocidade. DICA 2: Certifique-se de que a sua chave de API criada no Google AI Studio esteja vinculada a um Projeto do Google Cloud com faturamento (Billing) ativo, e não ao projeto sandbox padrão.";
     }
     itemToProcess.error = errorMsg;
   } finally {
@@ -668,7 +907,8 @@ async function startServer() {
       maxRetries,
       ocrApiKey,
       ocrEngine,
-      ocrLanguage
+      ocrLanguage,
+      googleVisionApiKey
     });
   });
 
@@ -681,7 +921,8 @@ async function startServer() {
       maxRetries: targetRetries,
       ocrApiKey: targetApiKey,
       ocrEngine: targetEngine,
-      ocrLanguage: targetLanguage
+      ocrLanguage: targetLanguage,
+      googleVisionApiKey: targetVisionApiKey
     } = req.body;
 
     if (typeof delayMs === 'number' && delayMs >= 0) {
@@ -690,7 +931,7 @@ async function startServer() {
     if (typeof targetConcurrency === 'number' && targetConcurrency >= 1) {
       maxConcurrency = targetConcurrency;
     }
-    if (targetMode === 'hybrid' || targetMode === 'direct' || targetMode === 'ai' || targetMode === 'ocr-space' || targetMode === 'ocr-space-only') {
+    if (targetMode === 'hybrid' || targetMode === 'direct' || targetMode === 'ai' || targetMode === 'ocr-space' || targetMode === 'ocr-space-only' || targetMode === 'google-vision' || targetMode === 'google-vision-only') {
       extractionMode = targetMode;
     }
     if (typeof targetPause === 'boolean') {
@@ -708,6 +949,9 @@ async function startServer() {
     if (typeof targetLanguage === 'string') {
       ocrLanguage = targetLanguage;
     }
+    if (typeof targetVisionApiKey === 'string') {
+      googleVisionApiKey = targetVisionApiKey;
+    }
     
     // Trigger queue in case concurrency/pause state has been changed
     processQueue().catch(console.error);
@@ -721,7 +965,8 @@ async function startServer() {
       maxRetries,
       ocrApiKey,
       ocrEngine,
-      ocrLanguage
+      ocrLanguage,
+      googleVisionApiKey
     });
   });
 

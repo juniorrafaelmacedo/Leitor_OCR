@@ -9,21 +9,23 @@ interface QueueViewerProps {
   onClearQueue: () => void;
   delayMs?: number;
   maxConcurrency?: number;
-  extractionMode?: 'hybrid' | 'direct' | 'ai' | 'ocr-space';
+  extractionMode?: 'hybrid' | 'direct' | 'ai' | 'ocr-space' | 'ocr-space-only' | 'google-vision' | 'google-vision-only';
   isQueuePaused?: boolean;
   maxRetries?: number;
   ocrApiKey?: string;
   ocrEngine?: string;
   ocrLanguage?: string;
+  googleVisionApiKey?: string;
   onUpdateSettings?: (updates: {
     delayMs?: number;
     maxConcurrency?: number;
-    extractionMode?: 'hybrid' | 'direct' | 'ai' | 'ocr-space';
+    extractionMode?: 'hybrid' | 'direct' | 'ai' | 'ocr-space' | 'ocr-space-only' | 'google-vision' | 'google-vision-only';
     isQueuePaused?: boolean;
     maxRetries?: number;
     ocrApiKey?: string;
     ocrEngine?: string;
     ocrLanguage?: string;
+    googleVisionApiKey?: string;
   }) => void;
   onRetryAllFailed?: () => void;
   onRetryRow?: (id: string) => void;
@@ -36,12 +38,13 @@ export const QueueViewer: React.FC<QueueViewerProps> = ({
   onClearQueue,
   delayMs = 4500,
   maxConcurrency = 1,
-  extractionMode = 'hybrid',
+  extractionMode = 'ocr-space-only',
   isQueuePaused = false,
   maxRetries = 3,
   ocrApiKey = 'K88221884388957',
   ocrEngine = '2',
   ocrLanguage = 'por',
+  googleVisionApiKey = '',
   onUpdateSettings,
   onRetryAllFailed,
   onRetryRow,
@@ -164,65 +167,132 @@ export const QueueViewer: React.FC<QueueViewerProps> = ({
       <div className="bg-sand-200 border-2 border-dark-900 rounded-none p-4 shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] text-dark-900 font-mono">
         <div className="flex items-center gap-1.5 mb-2">
           <Shield className="w-4 h-4 text-brand-orange" />
-          <h4 className="text-xs font-bold uppercase tracking-wider">[ MODO DE RECONHECIMENTO ]</h4>
+          <h4 className="text-xs font-bold uppercase tracking-wider">[ SELEÇÃO DO MOTOR DE LEITURA & OCR ]</h4>
         </div>
-        <p className="text-[10px] text-dark-900/75 leading-relaxed mb-3.5">
-          Selecione o motor de leitura ideal. Evite dúvidas escolhendo uma de nossas 3 estratégias de leitura recomendadas:
+        <p className="text-[10px] text-dark-900/75 leading-relaxed mb-4">
+          <strong>Sim, o sistema roda de forma 100% autônoma usando apenas o Google Cloud Vision!</strong> Escolha entre os motores de alta precisão do Google ou use as alternativas econômicas de processamento:
         </p>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
-          {[
-            {
-              id: 'hybrid' as const,
-              label: "🧠 1. Híbrido Inteligente",
-              badge: "Gemini IA + Local",
-              desc: "O padrão inteligente. Decodifica arquivos digitais de graça e usa a IA do Gemini apenas em mídias escaneadas ou fotos.",
-              isActive: extractionMode === 'hybrid'
-            },
-            {
-              id: 'direct' as const,
-              label: "⚡ 2. Leitura Digital Direta",
-              badge: "Cota Zero (Sem IA)",
-              desc: "100% grátis e imediato. Lê textos digitais originais da fatura e preenche os campos usando expressões locais.",
-              isActive: extractionMode === 'direct'
-            },
-            {
-              id: 'ocr-space-only' as const,
-              label: "🚀 3. Somente OCR Space",
-              badge: "Sem IA / OCR Seguro",
-              desc: "Processa fotos/scans usando unicamente a API ocr.space e mapeia dados via regex local. Livre de custos ou limites Gemini.",
-              isActive: extractionMode === 'ocr-space-only'
-            }
-          ].map((modeOpt) => {
-            return (
-              <button
-                key={modeOpt.id}
-                type="button"
-                onClick={() => onUpdateSettings?.({ extractionMode: modeOpt.id })}
-                className={`p-3 border-2 text-left flex flex-col justify-between transition-all cursor-pointer ${
-                  modeOpt.isActive 
-                    ? 'border-dark-900 bg-brand-orange text-dark-900 font-bold shadow-[2px_2px_0px_0px_rgba(20,20,20,1)]' 
-                    : 'border-dark-900/30 bg-white hover:bg-sand-150 text-dark-900/80 hover:border-dark-900'
-                }`}
-              >
-                <div>
-                  <span className="text-[10px] uppercase font-black block leading-tight">{modeOpt.label}</span>
-                  <span className="inline-block px-1.5 py-0.2 text-[7.5px] font-black uppercase tracking-wider bg-dark-900 text-sand-100 rounded-none mt-1">
-                    {modeOpt.badge}
-                  </span>
-                </div>
-                <span className="text-[8.5px] opacity-85 block mt-2.5 leading-relaxed font-sans font-normal border-t border-dark-900/10 pt-2">{modeOpt.desc}</span>
-              </button>
-            );
-          })}
+        {/* 🌟 SEÇÃO EM DESTAQUE - GOOGLE CLOUD VISION */}
+        <div className="border-4 border-amber-500 bg-amber-50/50 p-3.5 mb-4 shadow-[4px_4px_0px_0px_rgba(245,158,11,1)]">
+          <div className="flex items-center justify-between border-b-2 border-amber-500 pb-2 mb-3">
+            <div className="flex items-center gap-2">
+              <span className="text-sm">👁️</span>
+              <span className="text-[10.5px] font-black uppercase text-amber-800 tracking-wider">
+                MOTORES DE ALTA FIDELIDADE (GOOGLE CLOUD VISION API)
+              </span>
+            </div>
+            <span className="px-1.5 py-0.5 text-[7px] font-black uppercase bg-amber-500 text-white animate-pulse">
+              RECOMENDADO PARA FOTOS E PAPEL
+            </span>
+          </div>
+          
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {[
+              {
+                id: 'google-vision-only' as const,
+                label: "🌟 1. Somente Google Vision (0% IA Gemini)",
+                badge: "Segurança de Quota • Sem Custo IA",
+                desc: "Executa leitura óptica industrial do Google Cloud Vision e extrai o faturamento com Regex locais. Perfeito para rodar com custo zero de tokens de IA!",
+                isActive: extractionMode === 'google-vision-only'
+              },
+              {
+                id: 'google-vision' as const,
+                label: "✨ 2. Híbrido Google Vision + Gemini IA",
+                badge: "Precisão Máxima Absoluta",
+                desc: "O motor mais potente. Realiza OCR fiel pelo Google Cloud e envia o texto bruto estruturado para conferência exata de todos os detalhes na IA Gemini.",
+                isActive: extractionMode === 'google-vision'
+              }
+            ].map((modeOpt) => {
+              return (
+                <button
+                  key={modeOpt.id}
+                  type="button"
+                  onClick={() => onUpdateSettings?.({ extractionMode: modeOpt.id })}
+                  className={`p-3.5 border-2 text-left flex flex-col justify-between transition-all cursor-pointer ${
+                    modeOpt.isActive 
+                      ? 'border-dark-900 bg-amber-500 text-white font-bold shadow-[2px_2px_0px_0px_rgba(20,20,20,1)]' 
+                      : 'border-dark-900/30 bg-white hover:bg-amber-100/50 text-[#141414]/90 hover:border-dark-900'
+                  }`}
+                >
+                  <div>
+                    <span className="text-[10px] uppercase font-black block leading-tight">{modeOpt.label}</span>
+                    <span className={`inline-block px-1.5 py-0.2 text-[7.5px] font-black uppercase tracking-wider mt-1 ${
+                      modeOpt.isActive ? 'bg-white text-amber-800' : 'bg-dark-900 text-sand-100'
+                    }`}>
+                      {modeOpt.badge}
+                    </span>
+                  </div>
+                  <span className={`text-[8.5px] block mt-2.5 leading-relaxed font-sans font-normal border-t pt-2 ${
+                    modeOpt.isActive ? 'border-amber-400 opacity-95 text-white' : 'border-dark-900/10 text-dark-900/80'
+                  }`}>{modeOpt.desc}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* 🍃 SEÇÃO DE OUTROS MOTORES */}
+        <div className="border-2 border-dark-900/30 bg-white p-3">
+          <div className="text-[9px] font-black uppercase text-dark-900 pb-1.5 mb-2.5 border-b border-dark-900/10 flex items-center gap-1">
+            <span>🍂</span>
+            <span>ALTENATIVAS ECONÔMICAS / DIGITAIS DIRETOS</span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
+            {[
+              {
+                id: 'direct' as const,
+                label: "⚡ Texto Digital Direto",
+                badge: "Grátis • Sem IA",
+                desc: "Extrai texto nativo do PDF (para faturas digitais) e processa localmente com nossas expressões regulares. 100% imediato e gratuito.",
+                isActive: extractionMode === 'direct'
+              },
+              {
+                id: 'ocr-space-only' as const,
+                label: "🚀 Somente OCR Space",
+                badge: "Grátis (Sem IA)",
+                desc: "Realiza leitura óptica via OCR Space gratuito e extrai com Regex. Ótima opção sem custo para imagens de boa qualidade.",
+                isActive: extractionMode === 'ocr-space-only'
+              },
+              {
+                id: 'hybrid' as const,
+                label: "🧠 OCR Space + Gemini IA",
+                badge: "Híbrido Clássico",
+                desc: "Leitor OCR Space combinado com re-tentativa ou refinamento estruturado usando IA do Gemini.",
+                isActive: extractionMode === 'hybrid'
+              }
+            ].map((modeOpt) => {
+              return (
+                <button
+                  key={modeOpt.id}
+                  type="button"
+                  onClick={() => onUpdateSettings?.({ extractionMode: modeOpt.id })}
+                  className={`p-2.5 border-2 text-left flex flex-col justify-between transition-all cursor-pointer ${
+                    modeOpt.isActive 
+                      ? 'border-dark-900 bg-brand-orange text-dark-900 font-bold shadow-[2px_2px_0px_0px_rgba(20,20,20,1)]' 
+                      : 'border-dark-900/20 bg-sand-100 hover:bg-sand-150 text-dark-900/80 hover:border-dark-900'
+                  }`}
+                >
+                  <div>
+                    <span className="text-[9px] uppercase font-black block leading-tight">{modeOpt.label}</span>
+                    <span className="inline-block px-1 py-0.2 text-[7px] font-black uppercase tracking-wider bg-dark-900 text-sand-100 mt-1">
+                      {modeOpt.badge}
+                    </span>
+                  </div>
+                  <span className="text-[8px] opacity-80 block mt-2 leading-relaxed font-sans font-normal border-t border-dark-900/10 pt-1.5">{modeOpt.desc}</span>
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         {/* Action link for Advanced Settings */}
-        <div className="mt-3.5 flex justify-end">
+        <div className="mt-3 flex justify-end">
           <button
             type="button"
             onClick={() => setShowAdvanced(!showAdvanced)}
-            className="text-[9px] font-black uppercase tracking-wider text-dark-900 hover:text-brand-orange hover:border-dark-900 bg-white px-2 py-1 border-2 border-dark-900 shadow-[2px_2px_0px_0px_rgba(20,20,20,1)] hover:translate-x-[1px] hover:translate-y-[1px] hover:shadow-none transition-all cursor-pointer flex items-center gap-1.5"
+            className="text-[8.5px] font-black uppercase tracking-wider text-dark-900 hover:text-brand-orange hover:border-dark-900 bg-white px-2 py-1 border-2 border-dark-900 shadow-[2px_2px_0px_0px_rgba(20,20,20,1)] hover:translate-x-[1px] hover:translate-y-[1px] hover:shadow-none transition-all cursor-pointer flex items-center gap-1.5"
           >
             <span>{showAdvanced ? "▲ Ocultar Ajustes Avançados" : "⚙️ Mostrar Opções Avançadas e Chaves"}</span>
           </button>
@@ -284,9 +354,45 @@ export const QueueViewer: React.FC<QueueViewerProps> = ({
               <span>💡</span>
               <span>
                 {extractionMode === 'ocr-space-only' ? (
-                  <><strong>Fluxo sem IA:</strong> O documento será lido via OCR Space e os campos da tabela serão preenchidos usando apenas expressões regulares locais, garantindo consumo de cota zero da API Gemini!</>
+                  <><strong>Escalonamento Ativo:</strong> O lote tentará rodar 100% de graça com OCR Space + Regex local. Se o arquivo passar de 1MB, o OCR ficar indisponível ou se faltarem campos críticos (UC, valor, referência), a IA do Gemini assume o fluxo para garantir um resultado perfeito!</>
                 ) : (
-                  <><strong>Fluxo OCR + IA:</strong> A fatura será processada pelo leitor OCR Space primeiro, e o texto gerado será estruturado e refinado pela inteligência artificial do Gemini!</>
+                  <><strong>OCR + IA Super Resiliente:</strong> Combina o leitor óptico OCR Space com a estruturação inteligente do Gemini 3.5. Caso a API de OCR tenha qualquer interrupção, o arquivo é processado automaticamente e por completo via visão computacional direta do Gemini.</>
+                )}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* Google Vision parameters integrated directly when a Google Vision mode is chosen! */}
+        {(extractionMode === 'google-vision' || extractionMode === 'google-vision-only') && (
+          <div className="mt-3.5 p-3 bg-white border-2 border-dark-900 shadow-[2px_2px_0px_0px_rgba(20,20,20,1)] text-[#141414] font-mono">
+            <div className="text-[10px] font-bold uppercase text-brand-orange border-b border-dark-900/10 pb-1.5 mb-2.5 flex items-center gap-1.5">
+              <span>👁️ PARÂMETROS OBRIGATÓRIOS DO GOOGLE CLOUD VISION API</span>
+            </div>
+            
+            <div className="space-y-2">
+              <div>
+                <label className="block text-[8.5px] font-black uppercase mb-1">Chave de API do Google Cloud (Vision API):</label>
+                <input
+                  type="text"
+                  value={googleVisionApiKey}
+                  onChange={(e) => onUpdateSettings?.({ googleVisionApiKey: e.target.value })}
+                  placeholder="Insira sua Chave de API Google Vision"
+                  className="w-full bg-sand-100 border-2 border-dark-900 text-[#141414] px-2 py-1.5 text-[10px] font-mono font-bold focus:bg-white focus:outline-none"
+                />
+                <span className="text-[7.5px] text-dark-900/60 mt-0.5 block font-bold">
+                  Insira a Credencial do seu Google Cloud Console com o serviço "Cloud Vision API" ativo. No seu painel do Google, o valor dessa credential está salvo sob o nome <strong className="text-brand-orange font-black">"Chave de API 1"</strong>.
+                </span>
+              </div>
+            </div>
+
+            <div className="mt-2.5 pt-2 border-t border-dark-900/10 flex items-start gap-1 text-[8.5px] text-dark-900/70 leading-normal">
+              <span>💡</span>
+              <span>
+                {extractionMode === 'google-vision-only' ? (
+                  <><strong>Somente Vision OCR:</strong> Executa a leitura computacional estrita do Google Cloud Vision e passa o texto bruto para expressões regulares locais de faturamento da Enel, CPFL, etc. 100% livre de consumo de tokens do Gemini.</>
+                ) : (
+                  <><strong>Premium Híbrido:</strong> O mais robusto detector de faturas. Ativa o motor óptico profissional de Vision para arquivos difíceis ou fotos desfocadas de aparelhos e repassa o resultado estruturado para estruturação minuciosa com IA Gemini.</>
                 )}
               </span>
             </div>
@@ -392,15 +498,29 @@ export const QueueViewer: React.FC<QueueViewerProps> = ({
                   id: 'ai' as const,
                   label: "4. Forçar Totalmente Gemini IA", 
                   badge: "Sempre Consome Chave de API",
-                  desc: "Desativa o pré-leitor digital local e força a leitura via Visão Computacional do Gemini para todos os arquivos. Uso tático em fotos rotacionadas.",
+                  desc: "Desativa o pré-leitor digital local e força a leitura via Visão Computacional do Gemini para todos os arquivos. Uso tático em faturas severamente rotacionadas ou degradadas.",
                   isActive: extractionMode === 'ai'
                 },
                 { 
                   id: 'ocr-space' as const,
                   label: "5. Híbrido OCR Space + Refinamento Gemini", 
                   badge: "Leitor OCR Híbrido",
-                  desc: "Combina o melhor dos dois mundos: realiza OCR via ocr.space e passa o texto estruturado para refino gramatical do Gemini.",
+                  desc: "Combina o melhor dos dois mundos: realiza OCR via ocr.space e passa o texto estruturado para estruturação gramatical minuciosa do Gemini.",
                   isActive: extractionMode === 'ocr-space'
+                },
+                { 
+                  id: 'google-vision' as const,
+                  label: "6. Híbrido Google Vision + Gemini", 
+                  badge: "Premium Alta Fidelidade",
+                  desc: "Executa reconhecimento óptico profissional e ultra-preciso via IA de Visão do Google Cloud, encaminhando o texto lapidado para extração exata do Gemini.",
+                  isActive: extractionMode === 'google-vision'
+                },
+                { 
+                  id: 'google-vision-only' as const,
+                  label: "7. Somente Google Vision (Sem IA)", 
+                  badge: "100% Custo de IA Zero",
+                  desc: "Executa leitura OCR hiper-fiel pelo motor de visão do Google Cloud e deduz dados com Regex locais. Livre de consumo de créditos/tokens de IA.",
+                  isActive: extractionMode === 'google-vision-only'
                 }
               ].map((modeOpt) => {
                 return (

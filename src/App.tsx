@@ -23,7 +23,7 @@ export default function App() {
   const [isUploading, setIsUploading] = useState(false);
   const [delayMs, setDelayMs] = useState<number>(2000);
   const [maxConcurrency, setMaxConcurrency] = useState<number>(1);
-  const [extractionMode, setExtractionMode] = useState<'hybrid' | 'direct' | 'ai' | 'ocr-space' | 'ocr-space-only'>('ocr-space-only');
+  const [extractionMode, setExtractionMode] = useState<'hybrid' | 'direct' | 'ai' | 'ocr-space' | 'ocr-space-only' | 'google-vision' | 'google-vision-only'>('ocr-space-only');
   const [isQueuePaused, setIsQueuePaused] = useState<boolean>(false);
   const [maxRetries, setMaxRetries] = useState<number>(3);
   const [isServerOffline, setIsServerOffline] = useState(false);
@@ -32,6 +32,9 @@ export default function App() {
   const [ocrApiKey, setOcrApiKey] = useState<string>('K88221884388957');
   const [ocrEngine, setOcrEngine] = useState<string>('2');
   const [ocrLanguage, setOcrLanguage] = useState<string>('por');
+
+  // google cloud vision parameters
+  const [googleVisionApiKey, setGoogleVisionApiKey] = useState<string>('');
 
   // In-memory reference mapping QueueItem ID to Base64 file contents to enable retrying from catalog rows
   const fileBase64sRef = useRef<Record<string, string>>({});
@@ -82,6 +85,9 @@ export default function App() {
         if (typeof data.ocrLanguage === 'string') {
           setOcrLanguage(data.ocrLanguage);
         }
+        if (typeof data.googleVisionApiKey === 'string') {
+          setGoogleVisionApiKey(data.googleVisionApiKey);
+        }
         setIsServerOffline(false);
       }
     } catch (e) {
@@ -93,12 +99,13 @@ export default function App() {
   const handleUpdateSettings = async (updates: { 
     delayMs?: number; 
     maxConcurrency?: number; 
-    extractionMode?: 'hybrid' | 'direct' | 'ai' | 'ocr-space' | 'ocr-space-only'; 
+    extractionMode?: 'hybrid' | 'direct' | 'ai' | 'ocr-space' | 'ocr-space-only' | 'google-vision' | 'google-vision-only'; 
     isQueuePaused?: boolean; 
     maxRetries?: number;
     ocrApiKey?: string;
     ocrEngine?: string;
     ocrLanguage?: string;
+    googleVisionApiKey?: string;
   }) => {
     try {
       const res = await fetch('/api/queue/settings', {
@@ -131,6 +138,9 @@ export default function App() {
         }
         if (typeof data.ocrLanguage === 'string') {
           setOcrLanguage(data.ocrLanguage);
+        }
+        if (typeof data.googleVisionApiKey === 'string') {
+          setGoogleVisionApiKey(data.googleVisionApiKey);
         }
         setIsServerOffline(false);
       }
@@ -518,6 +528,7 @@ export default function App() {
               ocrApiKey={ocrApiKey}
               ocrEngine={ocrEngine}
               ocrLanguage={ocrLanguage}
+              googleVisionApiKey={googleVisionApiKey}
               onUpdateSettings={handleUpdateSettings}
               onRetryAllFailed={handleRetryAllFailed}
               onRetryRow={handleRetryRow}
@@ -547,12 +558,12 @@ export default function App() {
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-3">
           <div className="flex items-center gap-1.5 font-bold uppercase tracking-wider">
             <span className="w-2.5 h-2.5 bg-brand-orange animate-ping rounded-full inline-block"></span>
-            <span>CATALOG-OCR SERVER STABLE</span>
+            <span>CATALOG-OCR ENGINE STABLE</span>
           </div>
           <div className="flex gap-4 text-sand-200/50">
+            <span className="text-brand-orange font-bold font-mono">VERSÃO: 3.4.0 (MOTOR OCR Space + REGEX GRATUITO)</span>
             <span>PING: 8ms</span>
-            <span>CPU CORE USAGE: 14%</span>
-            <span>HEAP: 218MB / 1024MB</span>
+            <span>CPU USAGE: 14%</span>
           </div>
           <p className="opacity-60">© 2026 Inteligência de Extração em Lote.</p>
         </div>
