@@ -73,8 +73,12 @@ function standardizeCurrency(val: string): string {
  * Monthly electrical energy consumption in kWh is always a whole number (or integer) when parsed and normalized.
  */
 function isProbablyTariff(valStr: string): boolean {
-  if (!valStr) return false;
+  if (!valStr) return true; // Empty is invalid/rejected
   let cleaned = valStr.trim();
+  
+  // Remove currency symbol prefix if present
+  cleaned = cleaned.replace(/R\$/gi, '').trim();
+
   if (cleaned.includes(',') && cleaned.includes('.')) {
     cleaned = cleaned.replace(/\./g, '').replace(',', '.');
   } else if (cleaned.includes(',')) {
@@ -92,14 +96,33 @@ function isProbablyTariff(valStr: string): boolean {
   }
   cleaned = cleaned.replace(/[^0-9.]/g, '');
   const floatVal = parseFloat(cleaned);
-  if (isNaN(floatVal)) return false;
+  if (isNaN(floatVal) || floatVal <= 0) return true; // Invalid or <= 0 is rejected
   
-  // A tariff unit price is typically a fractional float less than 5.0 (like 0.3928, 0.2831, 0.72)
-  // Monthly electricity consumption (kWh) is never a fractional value less than 5.
+  // 1. A unit tariff or rate is typically a fractional float less than 5.0 (like 0.3928, 0.2831, 1.442)
   if (floatVal < 5.0 && floatVal % 1 !== 0) {
-    return true;
+    return true; // Rejected
   }
-  return false;
+
+  // 2. Active energy consumption faturado (kWh) is represented in integer quantities of kWh.
+  // It is never a monetary cents value like 937.22, 537.78, 364.02 etc.
+  // Thus, if it has a non-zero decimal part representing cents, reject it.
+  const decimalPart = floatVal % 1;
+  if (decimalPart !== 0) {
+    // If the decimal part is not very close to 0 or 1, reject it to avoid picking up financial values or currency subtotals
+    if (decimalPart > 0.001 && decimalPart < 0.999) {
+      console.log(`[Validation] Rejecting ${floatVal} (raw: ${valStr}) as consumption because it has cents/decimals (likely financial value)`);
+      return true; // Rejected
+    }
+  }
+
+  // 3. Avoid typical years (e.g. 2024, 2025, 2026, 2030, etc.)
+  const typicalYears = [2022, 2023, 2024, 2025, 2026, 2027, 2028, 2029, 2030];
+  if (typicalYears.includes(floatVal)) {
+    console.log(`[Validation] Rejecting ${floatVal} (raw: ${valStr}) as consumption because it corresponds to a typical year`);
+    return true; // Rejected
+  }
+
+  return false; // Accepted
 }
 
 /**
@@ -668,16 +691,16 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
       if (!value) {
         const itemRowPatterns = [
           // Enel: "(TUSD) KWH 1.440,000" or "(TE) KWH 1.440,000"
-          /(?:tusd|te)\s*\(?\s*kwh\s*\)?\s*([0-9\s\.,]{3,15})\s+[0-9]/i,
+          /(?:tusd|te)\)?\s*\(?\s*kwh\s*\)?\s*([0-9\.,]{3,15})\s+[0-9]/i,
           // CPFL: "TUSD DEZ/25 kWh 1.046,0000" or "TE DEZ/25 kWh 1.046,0000"
-          /(?:tusd|te)(?:\s+[a-z]{3}\/[0-9]{2})?\s*kwh\s*([0-9\s\.,]{3,15})\b/i,
+          /(?:tusd|te)\)?(?:\s+[a-z]{3}\/[0-9]{2})?\s*kwh\s*([0-9\.,]{3,15})\b/i,
           // CPFL 2: "Consumo Uso Sistema [KWh]-TUSD"
-          /tusd\s*kwh\s*([0-9\s\.,]{3,15})/i,
-          /te\s*kwh\s*([0-9\s\.,]{3,15})/i,
+          /tusd\)?\s*kwh\s*([0-9\.,]{3,15})/i,
+          /te\)?\s*kwh\s*([0-9\.,]{3,15})/i,
           // "Seu consumo foi de 5222 kWh em 29 dias"
-          /seu\s+consumo\s+foi\s+de\s*([0-9\s\.,]+)\s*kwh/i,
+          /seu\s+consumo\s+foi\s+de\s*([0-9\.,]+)\s*kwh/i,
           // "Consumo (kWh) ... 5 222"
-          /consumo(?:\s*\(kwh\))?(?:\s*\(atual-anterior\))?\s*[:\- =]*\s*([0-9\s\.,]+)\s*kwh/i,
+          /consumo(?:\s*\(kwh\))?(?:\s*\(atual-anterior\))?\s*[:\- =]*\s*([0-9\.,]+)\s*kwh/i,
         ];
 
         for (const rx of itemRowPatterns) {
@@ -704,11 +727,11 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
       if (!value) {
         // Direct regex patterns with captures
         const directRegexes = [
-          /(?:quant\.?\s*faturada|quantidade\s+faturada|qtde\.?\s*faturada)\s*[:\- R$]*\s*\b([0-9\s\.,]+)\b/i,
-          /(?:quant\.?\s*\(?\s*kwh\s*\)?|quant\.?\s*kwh|qtde\.?\s*\(?\s*kwh\s*\)?)\s*[:\- R$]*\s*\b([0-9\s\.,]+)\b/i,
-          /(?:consumo\s*(?:em\s+)?kwh|consumo\s*(?:de\s+)?kwh|consumo\s*(?:de\s+energia\s+)?kwh)\s*[:\- R$]*\s*\b([0-9\s\.,]+)\b/i,
-          /consumo\s+em\s+kwh\s*[:\- R$]*\s*\b([0-9\s\.,]+)\b/i,
-          /consumo\s+kwh\s*[:\- R$]*\s*\b([0-9\s\.,]+)\b/i,
+          /(?:quant\.?\s*faturada|quantidade\s+faturada|qtde\.?\s*faturada)\s*[:\- R$]*\s*\b([0-9\.,]+)\b/i,
+          /(?:quant\.?\s*\(?\s*kwh\s*\)?|quant\.?\s*kwh|qtde\.?\s*\(?\s*kwh\s*\)?)\s*[:\- R$]*\s*\b([0-9\.,]+)\b/i,
+          /(?:consumo\s*(?:em\s+)?kwh|consumo\s*(?:de\s+)?kwh|consumo\s*(?:de\s+energia\s+)?kwh)\s*[:\- R$]*\s*\b([0-9\.,]+)\b/i,
+          /consumo\s+em\s+kwh\s*[:\- R$]*\s*\b([0-9\.,]+)\b/i,
+          /consumo\s+kwh\s*[:\- R$]*\s*\b([0-9\.,]+)\b/i,
         ];
         for (const regex of directRegexes) {
           const match = normText.match(regex);
@@ -1151,8 +1174,11 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
           if (match) {
             const candidate = match[1].trim();
             if (!isProbablyTariff(candidate)) {
+              console.log(`[Generic Fallback Charges Match] Pattern: "${pattern}" -> Candidate: "${candidate}"`);
               value = candidate;
               break;
+            } else {
+              console.log(`[Generic Fallback Charges Ignored Tariff] Pattern: "${pattern}" -> Candidate: "${candidate}"`);
             }
           }
         }
@@ -1175,6 +1201,7 @@ export function extractFieldsWithRegex(text: string, fields: ExtractionField[]):
           if (match) {
             const candidate = match[1].trim();
             if (!isProbablyTariff(candidate)) {
+              console.log(`[User Spec Pattern Match] Pattern: "${regex}" -> Candidate: "${candidate}"`);
               value = candidate;
               break;
             }

@@ -632,7 +632,7 @@ export default function App() {
             <span>CATALOG-OCR ENGINE STABLE</span>
           </div>
           <div className="flex gap-4 text-sand-200/50">
-            <span className="text-brand-orange font-bold font-mono">VERSÃO: 3.4.0 (MOTOR OCR Space + REGEX GRATUITO)</span>
+            <span className="text-brand-orange font-bold font-mono">VERSÃO: 3.5.0 (MOTOR OCR Space + REGEX ENEL FIXED)</span>
             <span>PING: 8ms</span>
             <span>CPU USAGE: 14%</span>
           </div>

@@ -475,7 +475,7 @@ async function runWorker(itemToProcess: ServerQueueItem) {
       } else if (fieldName === 'valor_total') {
         desc += " (O valor monetário total real a pagar desta fatura em Reais. Busque por termos como 'Valor Total', 'Total a Pagar', 'Valor Líquido' ou 'Total do Documento'. Exclua faturamentos parciais de bandeiras ou tarifas unitárias individuais menores como 0.52 etc.)";
       } else if (fieldName === 'consumo_kwh') {
-        desc += " (A quantidade física real de faturado de energia ativa consumida em kWh, ex: '325', '1450', etc. NÃO extraia tarifas unitárias de energia como 0.85 ou 0.42. O valor ideal está geralmente nas linhas ativas de faturamento TUSD e TE, ou em seções como 'Consumo do Mês' ou 'Consumo kWh'.)";
+        desc += " (A quantidade física real faturada de energia ativa consumida em kWh, ex: '325', '1450', etc. O consumo de kWh é tipicamente um valor inteiro. IMPORTANTE: NÃO extraia tarifas unitárias (ex: 0.85) e NUNCA extraia valores financeiros tributados ou cobranças monetárias que possuam centavos ou decimais dízimas como '937.22', '537.78', '364.02' etc! O valor correto é o volume de kWh consumidos (ex: 960).)";
       } else if (fieldName === 'concessionaria') {
         desc += " (Identifique o nome da empresa distribuidora de energia que emite a fatura, ex: Enel, CPFL, Elektro, Energisa, Light, Neoenergia, Cemig, Copel, RGE, etc.)";
       }
